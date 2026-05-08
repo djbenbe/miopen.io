@@ -19,6 +19,8 @@
 AsyncMqttClient mqttClient;
 TimerHandle_t mqttReconnectTimer;
 TimerHandle_t heartbeatTimer;
+TaskHandle_t s_mqttPostConnectTask = nullptr;
+static portMUX_TYPE s_connectMux = portMUX_INITIALIZER_UNLOCKED;
 const char AVAILABILITY_TOPIC[] = "iown/status";
 static const char GATEWAY_ID[] = "MyOpenIO";
 
@@ -26,6 +28,7 @@ void initMqtt() {
     if (!nvs_read_string(NVS_KEY_MQTT_SERVER, mqtt_server)) {
         if (mqtt_server.empty()) {
             Serial.println("MQTT server not set");
+            return; // no need to continue
         } else {
             nvs_write_string(NVS_KEY_MQTT_SERVER, mqtt_server);
         }
@@ -70,7 +73,7 @@ void initMqtt() {
     mqttClient.onConnect(onMqttConnect);
     mqttClient.onDisconnect(onMqttDisconnect);
     mqttClient.onMessage(onMqttMessage);
-    mqttReconnectTimer = xTimerCreate("mqttTimer", pdMS_TO_TICKS(5000), pdFALSE,
+    mqttReconnectTimer = xTimerCreate("mqttTimer", pdMS_TO_TICKS(5000), pdTRUE,
                                       nullptr,
                                       reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
     if (WiFi.status() == WL_CONNECTED) {
@@ -212,25 +215,24 @@ void publishCoverPosition(const std::string &id, float position) {
     mqttClient.publish(topic.c_str(), 0, true, buf);
 }
 
-// ==== BELANGRIJK: scheduler die het zware werk in een eigen task zet ====
-void handleMqttConnect() {
-    if (mqttStatus != ConnState::Connected) return;
-    if (s_mqttPostConnectTask) return; // al bezig
-    xTaskCreatePinnedToCore(
-        mqttPostConnectTask,
-        "mqttPostConnect",
-        4096,      // stack
-        nullptr,
-        1,         // prioriteit laag
-        &s_mqttPostConnectTask,
-        tskNO_AFFINITY
-    );
-}
+static void publishIohcFrameDiscovery() {
+    JsonDocument configDoc;
+    configDoc["name"] = "IOHC Frame";
+    configDoc["state_topic"] = mqtt_discovery_topic + "/sensor/iohc_frame/state";
+    configDoc["unique_id"] = "iohc_frame";
+    configDoc["json_attributes_topic"] = mqtt_discovery_topic + "/sensor/iohc_frame/state";
 
-static void mqttPostConnectTask(void* /*arg*/) {
-    handleMqttConnectImpl();     // oude body van handleMqttConnect()
-    s_mqttPostConnectTask = nullptr;
-    vTaskDelete(nullptr);
+    JsonObject device = configDoc["device"].to<JsonObject>();
+    device["identifiers"] = GATEWAY_ID;
+    device["name"] = "My Open IO Gateway";
+    device["manufacturer"] = "Somfy";
+    device["model"] = "IO Blind Bridge";
+    device["sw_version"] = "1.0.0";
+
+    std::string cfg;
+    size_t cfgLen = serializeJson(configDoc, cfg);
+    mqttClient.publish((mqtt_discovery_topic + "/sensor/iohc_frame/config").c_str(),
+                       0, true, cfg.c_str(), cfgLen);
 }
 
 static void handleMqttConnectImpl() {
@@ -257,18 +259,51 @@ static void handleMqttConnectImpl() {
     publishHeartbeat(nullptr);
 }
 
-void connectToMqtt() {
-    if (mqttClient.connected() || mqttStatus == ConnState::Connecting) {
-        return;  // Avoid parallel connection attempts
+
+static void mqttPostConnectTask(void* /*arg*/) {
+    handleMqttConnectImpl();     // oude body van handleMqttConnect()
+
+    taskENTER_CRITICAL(&s_connectMux);
+    s_mqttPostConnectTask = nullptr;
+    taskEXIT_CRITICAL(&s_connectMux);
+
+    vTaskDelete(nullptr);
+}
+
+// ==== BELANGRIJK: scheduler die het zware werk in een eigen task zet ====
+void handleMqttConnect() {
+    if (mqttStatus != ConnState::Connected) return;
+
+    taskENTER_CRITICAL(&s_connectMux);
+    bool shouldSpawn = (s_mqttPostConnectTask == nullptr);
+    if (shouldSpawn)
+        s_mqttPostConnectTask = (TaskHandle_t)1; // placeholder to block re-entry
+    taskEXIT_CRITICAL(&s_connectMux);
+
+    if (!shouldSpawn) return;
+
+    BaseType_t result = xTaskCreatePinnedToCore(
+        mqttPostConnectTask,
+        "mqttPostConnect",
+        4096,      // stack
+        nullptr,
+        1,         // prioriteit laag
+        nullptr,   // handle not needed; task clears s_mqttPostConnectTask itself
+        tskNO_AFFINITY
+    );
+    if (result != pdPASS) {
+        taskENTER_CRITICAL(&s_connectMux);
+        s_mqttPostConnectTask = nullptr;
+        taskEXIT_CRITICAL(&s_connectMux);
     }
-    if (mqttReconnectTimer) {
-        xTimerStop(mqttReconnectTimer, 0);
+}
+
+void connectToMqtt() {
+    if (mqttClient.connected()) {
+        return;  // Avoid parallel connection attempts
     }
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi not connected, delaying MQTT connection");
-        if (mqttReconnectTimer) {
-            xTimerStart(mqttReconnectTimer, pdMS_TO_TICKS(5000));
-        }
         return;
     }
     if (mqtt_server.empty()) {
@@ -317,31 +352,7 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
     addLogMessage(String("Disconnected from MQTT (reason ") + String(static_cast<uint8_t>(reason)) + ")");
     mqttStatus = ConnState::Disconnected;
     updateDisplayStatus();
-    if (WiFi.status() == WL_CONNECTED && mqttReconnectTimer) {
-        xTimerStart(mqttReconnectTimer, 0);
-    }
 }
-
-static void publishIohcFrameDiscovery() {
-    JsonDocument configDoc;
-    configDoc["name"] = "IOHC Frame";
-    configDoc["state_topic"] = mqtt_discovery_topic + "/sensor/iohc_frame/state";
-    configDoc["unique_id"] = "iohc_frame";
-    configDoc["json_attributes_topic"] = mqtt_discovery_topic + "/sensor/iohc_frame/state";
-
-    JsonObject device = configDoc["device"].to<JsonObject>();
-    device["identifiers"] = GATEWAY_ID;
-    device["name"] = "My Open IO Gateway";
-    device["manufacturer"] = "Somfy";
-    device["model"] = "IO Blind Bridge";
-    device["sw_version"] = "1.0.0";
-
-    std::string cfg;
-    size_t cfgLen = serializeJson(configDoc, cfg);
-    mqttClient.publish((mqtt_discovery_topic + "/sensor/iohc_frame/config").c_str(),
-                       0, true, cfg.c_str(), cfgLen);
-}
-
 
 void mqttFuncHandler(const char *cmd) {
     constexpr char delim = ' ';
@@ -536,8 +547,10 @@ void onMqttMessage(char *topic, char *payload, AsyncMqttClientMessageProperties 
     }
 
     JsonDocument doc;
-    if (deserializeJson(doc, buf) != DeserializationError::Ok) {
-        Serial.println(F("Failed to parse JSON"));
+    DeserializationError error = deserializeJson(doc, buf);
+    if (error) {
+        Serial.print("Failed to parse JSON: ");
+        Serial.println(error.c_str());
         return;
     }
 
