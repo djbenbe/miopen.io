@@ -58,9 +58,10 @@ namespace IOHC {
             std::string description;
             std::string name;
             uint32_t travelTime{}; // seconds to fully open or close
+            bool repeatOnNoResponse{false};
             BlindPosition positionTracker{};
             enum class Movement { Idle, Opening, Closing } movement{Movement::Idle};
-            float lastPublishedPosition{-1.0f};
+            float lastPublishedPosition{0.0f};
             std::string lastPublishedState{};
             float targetPosition{-1.0f};
         };
@@ -69,6 +70,7 @@ namespace IOHC {
         ~iohcRemote1W() override = default;
 
         void cmd(RemoteButton cmd, Tokens* data);
+        void handleRemoteAction(RemoteButton cmd, const std::string &description);
         bool load() override;
         bool save() override;
 //        void scanDump() override { }
@@ -80,6 +82,7 @@ namespace IOHC {
         bool removeRemote(const std::string &description);
         bool renameRemote(const std::string &description, const std::string &name);
         bool setTravelTime(const std::string &description, uint32_t travelTime);
+        bool setRepeatOnNoResponse(const std::string &description, bool repeatOnNoResponse);
         void updatePositions();
 
     private:
@@ -92,9 +95,6 @@ namespace IOHC {
 
 
         std::vector<remote> remotes;
-
-        std::vector<iohcPacket *> packets2send{};
-
     };
 }
 #endif

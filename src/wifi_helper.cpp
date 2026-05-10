@@ -25,50 +25,137 @@
 
 TimerHandle_t wifiReconnectTimer;
 
-ConnState wifiStatus = ConnState::Disconnected;
+WiFiStatus wifiStatus = { ConnState::Disconnected, 0 };
+
+namespace {
+    constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;
+    constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 15000;
+    constexpr uint16_t WIFI_CONFIG_PORTAL_TIMEOUT_SEC = 180;
+    constexpr uint8_t WIFI_RESTART_AFTER_FAILURES = 3;
+
+    TaskHandle_t wifiReconnectTaskHandle = nullptr;
+    bool mdnsStarted = false;
+    uint8_t reconnectFailures = 0;
+
+    int rssiToQuality(int32_t rssi) {
+        if (rssi <= -100) return 0;
+        if (rssi >= -50) return 100;
+        return 2 * (rssi + 100);
+    }
+
+    void startWifiReconnectTimer() {
+        if (wifiReconnectTimer) {
+            xTimerStart(wifiReconnectTimer, 0);
+        }
+    }
+
+    void connectToWifiInternal(bool allowConfigPortal);
+
+    void wifiReconnectTask(void * /*arg*/) {
+        connectToWifiInternal(false);
+        wifiReconnectTaskHandle = nullptr;
+        vTaskDelete(nullptr);
+    }
+
+    void scheduleWifiReconnect(TimerHandle_t /*timer*/) {
+        if (wifiReconnectTaskHandle) {
+            return;
+        }
+        xTaskCreatePinnedToCore(
+            wifiReconnectTask,
+            "wifiReconnect",
+            4096,
+            nullptr,
+            1,
+            &wifiReconnectTaskHandle,
+            tskNO_AFFINITY
+        );
+    }
+}
 
 void initWifi() {
     wifiReconnectTimer = xTimerCreate(
         "wifiTimer",
-        pdMS_TO_TICKS(10000),  // 10 seconds retry interval
+        pdMS_TO_TICKS(WIFI_RECONNECT_INTERVAL_MS),
         pdFALSE,
         nullptr,
-        connectToWifi
+        scheduleWifiReconnect
     );
     if (!wifiReconnectTimer) {
         Serial.println("Failed to create WiFi reconnect timer");
     }
-    connectToWifi(nullptr);
+    connectToWifiInternal(true);
 }
 
 void connectToWifi(TimerHandle_t /*timer*/) {
-    Serial.println("Connecting to Wi-Fi via WiFiManager...");
-    wifiStatus = ConnState::Connecting;
+    connectToWifiInternal(false);
+}
+
+namespace {
+void connectToWifiInternal(bool allowConfigPortal) {
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiStatus = { ConnState::Connected, rssiToQuality(WiFi.RSSI()) };
+        return;
+    }
+
+    Serial.println("Connecting to Wi-Fi...");
+    wifiStatus = { ConnState::Connecting, 0 };
+
     updateDisplayStatus();
 
-    WiFi.mode(WIFI_STA);
-    WiFiManager wm;
-    wm.setConnectTimeout(30);        // 10 sec voor verbinding met AP
-    wm.setConfigPortalTimeout(180);  // 3 min captive portal open
+    if (!allowConfigPortal && reconnectFailures >= WIFI_RESTART_AFTER_FAILURES) {
+        Serial.println("Restarting WiFi radio after repeated reconnect failures");
+        WiFi.disconnect(false, false);
+        delay(100);
+        reconnectFailures = 0;
+    }
 
-    bool res = wm.autoConnect("iohc-setup");
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname("MIOPENIO");
+    WiFi.setSleep(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(false);
+
+    unsigned long startTime = millis();
+    WiFi.begin();
+    wl_status_t result = static_cast<wl_status_t>(WiFi.waitForConnectResult(WIFI_CONNECT_TIMEOUT_MS));
+
+    bool res = false;
+    if (result == WL_CONNECTED) {
+        res = true;
+    } else if (allowConfigPortal) {
+        WiFiManager wm;
+        wm.setConnectTimeout(WIFI_CONNECT_TIMEOUT_MS / 1000);
+        wm.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
+        Serial.println("Stored WiFi credentials failed, launching WiFiManager portal");
+        res = wm.autoConnect("iohc-setup");
+    } else {
+        Serial.println("Stored WiFi credentials failed, retrying later");
+    }
+
+    unsigned long duration = millis() - startTime;
+
     if (!res) {
-        Serial.println("WiFiManager failed to connect");
-        wifiStatus = ConnState::Disconnected;
-        updateDisplayStatus();
+        Serial.printf("WiFi connection failed after %lu ms\n", duration);
+        wifiStatus = { ConnState::Disconnected, 0 };
+        reconnectFailures++;
 
         // Retry later
-        if (wifiReconnectTimer) {
-            xTimerStart(wifiReconnectTimer, 0);
-        }
+        startWifiReconnectTimer();
     } else {
-        Serial.printf("Connected to WiFi. IP address: %s\n", WiFi.localIP().toString().c_str());
-        wifiStatus = ConnState::Connected;
-        updateDisplayStatus();
+        reconnectFailures = 0;
+        Serial.printf("Connected to WiFi in %lu ms. IP address: %s\n", duration,
+                      WiFi.localIP().toString().c_str());
+        wifiStatus = { ConnState::Connected, rssiToQuality(WiFi.RSSI()) };
 
+        if (mdnsStarted) {
+            MDNS.end();
+            mdnsStarted = false;
+        }
         if (!MDNS.begin("miopenio")) {
             Serial.println("Error setting up MDNS responder!");
         } else {
+            mdnsStarted = true;
             Serial.println("MDNS responder started at http://miopenio.local");
         }
 #if defined(MQTT)
@@ -80,23 +167,16 @@ void connectToWifi(TimerHandle_t /*timer*/) {
 #endif
     }
 }
+}
 
 void checkWifiConnection() {
     if (WiFi.status() != WL_CONNECTED) {
-        if (wifiStatus == ConnState::Connected) {
+        if (wifiStatus.connectionStatus == ConnState::Connected) {
             Serial.println("WiFi connection lost");
-            wifiStatus = ConnState::Disconnected;
+            wifiStatus = { ConnState::Disconnected, 0 };
             updateDisplayStatus();
 
-#if defined(MQTT)
-            Serial.println("Stopping MQTT reconnect timer");
-            if (mqttReconnectTimer) {
-                xTimerStop(mqttReconnectTimer, 0);
-            }
-#endif
-            if (wifiReconnectTimer) {
-                xTimerStart(wifiReconnectTimer, 0);
-            }
-        }
+            startWifiReconnectTimer();
+        }     
     }
 }

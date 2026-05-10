@@ -22,6 +22,7 @@
 #include <board-config.h>
 #include <user_config.h>
 
+#include <atomic>
 #include <vector>
 #include <sstream>
 #include <cstring>
@@ -31,10 +32,6 @@ extern "C" {
         #include "freertos/FreeRTOS.h"
         #include "freertos/timers.h"
 }
-
-#if defined(SSD1306_DISPLAY)
-#include <Adafruit_SSD1306.h>
-#endif
 
 #if defined(WEBSERVER)
 #include <web_server_handler.h>
@@ -58,10 +55,6 @@ namespace IOHC {
 #if defined(ESP32)
   #include <TickerUsESP32.h>
   #define MAXCMDS 50
-#endif
-
-#if defined(SSD1306_DISPLAY)
-extern Adafruit_SSD1306 display;
 #endif
 
 enum class ConnState { Connecting, Connected, Disconnected };
@@ -88,9 +81,9 @@ extern uint8_t lastEntry;
 
 namespace Cmd {
 
-extern bool verbosity;
-extern bool pairMode;
-extern bool scanMode;
+extern std::atomic<bool> verbosity;
+extern std::atomic<bool> pairMode;
+extern std::atomic<bool> scanMode;
 
 #if defined(ESP32)
   extern TimersUS::TickerUsESP32 kbd_tick;

@@ -17,10 +17,13 @@
 #include <iohcRemote1W.h>
 #include <iohcCozyDevice2W.h>
 #include <iohcOtherDevice2W.h>
+#include <iohcRemoteMap.h>
+#include <iohcPacket.h>
 #include <interact.h>
 #include <wifi_helper.h>
 #include <oled_display.h>
 #include <iohcCryptoHelpers.h>
+#include <algorithm>
 #include <cstdlib>
 #if defined(MQTT)
 #include <mqtt_handler.h>
@@ -43,17 +46,17 @@ void tokenize(std::string const &str, const char delim, Tokens &out) {
 
 
 namespace Cmd {
-bool verbosity = true;
-bool pairMode = false;
-bool scanMode = false;
+std::atomic<bool> verbosity = true;
+std::atomic<bool> pairMode = false;
+std::atomic<bool> scanMode = false;
 #if defined(ESP32)
 TimersUS::TickerUsESP32 kbd_tick;
 #endif
 TimerHandle_t consoleTimer;
 
 static char _rxbuffer[512];
-static uint8_t _len = 0;
-static uint8_t _avail = 0;
+static uint16_t _len = 0;
+static uint16_t _avail = 0;
 /**
  * The function `createCommands()` initializes and adds various command handlers for controlling
  * different devices and functionalities.
@@ -138,7 +141,11 @@ void createCommands() {
             Serial.println("Usage: new1W <name>");
             return;
         }
-        IOHC::iohcRemote1W::getInstance()->addRemote(cmd->at(1));
+        std::string name = cmd->at(1);
+        for (size_t i = 2; i < cmd->size(); ++i) {
+            name += " " + cmd->at(i);
+        }
+        IOHC::iohcRemote1W::getInstance()->addRemote(name);
     });
     Cmd::addHandler((char *) "del1W", (char *) "Remove 1W device", [](Tokens *cmd)-> void {
         if (cmd->size() < 2) {
@@ -152,7 +159,11 @@ void createCommands() {
             Serial.println("Usage: edit1W <description> <name>");
             return;
         }
-        IOHC::iohcRemote1W::getInstance()->renameRemote(cmd->at(1), cmd->at(2));
+        std::string name = cmd->at(2);
+        for (size_t i = 3; i < cmd->size(); ++i) {
+            name += " " + cmd->at(i);
+        }
+        IOHC::iohcRemote1W::getInstance()->renameRemote(cmd->at(1), name);
     });
     Cmd::addHandler((char *) "time1W", (char *) "Set 1W device travel time", [](Tokens *cmd)-> void {
         if (cmd->size() < 3) {
@@ -162,15 +173,95 @@ void createCommands() {
         uint32_t t = strtoul(cmd->at(2).c_str(), nullptr, 10);
         IOHC::iohcRemote1W::getInstance()->setTravelTime(cmd->at(1), t);
     });
+    Cmd::addHandler((char *) "repeat1W", (char *) "Set 1W device retry on no response", [](Tokens *cmd)-> void {
+        if (cmd->size() < 3) {
+            Serial.println("Usage: repeat1W <description> <0|1>");
+            return;
+        }
+        std::string value = cmd->at(2);
+        std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+        bool enabled = value == "1" || value == "true" || value == "yes" || value == "on";
+        IOHC::iohcRemote1W::getInstance()->setRepeatOnNoResponse(cmd->at(1), enabled);
+    });
     Cmd::addHandler((char *) "list1W", (char *) "List 1W devices", [](Tokens *cmd)-> void {
         const auto &remotes = IOHC::iohcRemote1W::getInstance()->getRemotes();
         for (const auto &r : remotes) {
-            Serial.printf("%s: %s %u %s\n",
+            Serial.printf("%s: %s %u %s repeatOnNoResponse=%s\n",
                           r.description.c_str(),
                           r.name.c_str(),
                           r.travelTime,
-                          r.paired ? "paired" : "unpaired");
+                          r.paired ? "paired" : "unpaired",
+                          r.repeatOnNoResponse ? "true" : "false");
         }
+    });
+    // Remote map
+    Cmd::addHandler((char *) "newRemote", (char *) "Create remote with address and name", [](Tokens *cmd)-> void {
+        if (cmd->size() < 3) {
+            Serial.println("Usage: newRemote <address> <name>");
+            return;
+        }
+        IOHC::address node{};
+        if (hexStringToBytes(cmd->at(1), node) != sizeof(IOHC::address)) {
+            Serial.println("Invalid address");
+            return;
+        }
+        std::string name = cmd->at(2);
+        for (size_t i = 3; i < cmd->size(); ++i) {
+            name += " " + cmd->at(i);
+        }
+        IOHC::iohcRemoteMap::getInstance()->add(node, name);
+    });
+    Cmd::addHandler((char *) "editRemote", (char *) "Edit remote name", [](Tokens *cmd)-> void {
+        if (cmd->size() < 2) {
+            Serial.println("Usage: editRemote <address> <name>");
+            return;
+        }
+        IOHC::address node{};
+        if (hexStringToBytes(cmd->at(1), node) != sizeof(IOHC::address)) {
+            Serial.println("Invalid address");
+            return;
+        }
+        std::string name = cmd->at(2);
+        for (size_t i = 3; i < cmd->size(); ++i) {
+            name += " " + cmd->at(i);
+        }
+        IOHC::iohcRemoteMap::getInstance()->renameDevice(node, name);
+    });
+    Cmd::addHandler((char *) "linkRemote", (char *) "Link device to remote", [](Tokens *cmd)-> void {
+        if (cmd->size() < 3) {
+            Serial.println("Usage: linkRemote <address> <device>");
+            return;
+        }
+        IOHC::address node{};
+        if (hexStringToBytes(cmd->at(1), node) != sizeof(IOHC::address)) {
+            Serial.println("Invalid address");
+            return;
+        }
+        IOHC::iohcRemoteMap::getInstance()->linkDevice(node, cmd->at(2));
+    });
+    Cmd::addHandler((char *) "unlinkRemote", (char *) "Remove device from remote", [](Tokens *cmd)-> void {
+        if (cmd->size() < 3) {
+            Serial.println("Usage: unlinkRemote <address> <device>");
+            return;
+        }
+        IOHC::address node{};
+        if (hexStringToBytes(cmd->at(1), node) != sizeof(IOHC::address)) {
+            Serial.println("Invalid address");
+            return;
+        }
+        IOHC::iohcRemoteMap::getInstance()->unlinkDevice(node, cmd->at(2));
+    });
+    Cmd::addHandler((char *) "delRemote", (char *) "Remove remote", [](Tokens *cmd)-> void {
+        if (cmd->size() < 2) {
+            Serial.println("Usage: delRemote <address>");
+            return;
+        }
+        IOHC::address node{};
+        if (hexStringToBytes(cmd->at(1), node) != sizeof(IOHC::address)) {
+            Serial.println("Invalid address");
+            return;
+        }
+        IOHC::iohcRemoteMap::getInstance()->remove(node);
     });
     // Other 2W
     Cmd::addHandler((char *) "discovery", (char *) "Send discovery on air", [](Tokens *cmd)-> void {
@@ -216,6 +307,10 @@ void createCommands() {
     Cmd::addHandler((char *) "ls", (char *) "List filesystem", [](Tokens *cmd)-> void { listFS(); });
     Cmd::addHandler((char *) "cat", (char *) "Print file content", [](Tokens *cmd)-> void { cat(cmd->at(1).c_str()); });
     Cmd::addHandler((char *) "rm", (char *) "Remove file", [](Tokens *cmd)-> void { rm(cmd->at(1).c_str()); });
+    Cmd::addHandler((char *) "lastAddr", (char *) "Show last received address", [](Tokens *cmd)-> void {
+        const auto _a = IOHC::lastFromAddress.load();
+        Serial.println(bytesToHexString(_a.b, sizeof(_a.b)).c_str());
+    });
 #if defined(MQTT)
     Cmd::addHandler((char *) "mqttIp", (char *) "Set MQTT server IP", [](Tokens *cmd)-> void {
         if (cmd->size() < 2) {
@@ -227,7 +322,7 @@ void createCommands() {
         nvs_write_string(NVS_KEY_MQTT_SERVER, mqtt_server);
 
         mqttClient.disconnect();
-        mqttClient.setServer(mqtt_server.c_str(), 1883);
+        mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
         connectToMqtt();
     });
     Cmd::addHandler((char *) "mqttUser", (char *) "Set MQTT username", [](Tokens *cmd)-> void {
@@ -243,6 +338,19 @@ void createCommands() {
         mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
         connectToMqtt();
     });
+    Cmd::addHandler((char *) "mqttId", (char *) "Set MQTT client ID", [](Tokens *cmd)-> void {
+        if (cmd->size() < 2) {
+            Serial.println("Usage: mqttId <id>");
+            return;
+        }
+        mqtt_client_id = cmd->at(1);
+
+        nvs_write_string(NVS_KEY_MQTT_CLIENT_ID, mqtt_client_id);
+
+        mqttClient.disconnect();
+        mqttClient.setClientId(mqtt_client_id.c_str());
+        connectToMqtt();
+    });
     Cmd::addHandler((char *) "mqttPass", (char *) "Set MQTT password", [](Tokens *cmd)-> void {
         if (cmd->size() < 2) {
             Serial.println("Usage: mqttPass <password>");
@@ -254,6 +362,24 @@ void createCommands() {
 
         mqttClient.disconnect();
         mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+        connectToMqtt();
+    });
+    Cmd::addHandler((char *) "mqttPort", (char *) "Set MQTT port", [](Tokens *cmd)-> void {
+        if (cmd->size() < 2) {
+            Serial.println("Usage: mqttPort <port>");
+            return;
+        }
+        int port = atoi(cmd->at(1).c_str());
+        if (port <= 0 || port > 65535) {
+            Serial.println("Invalid port value");
+            return;
+        }
+        mqtt_port = static_cast<uint16_t>(port);
+
+        nvs_write_u16(NVS_KEY_MQTT_PORT, mqtt_port);
+
+        mqttClient.disconnect();
+        mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
         connectToMqtt();
     });
     Cmd::addHandler((char *) "mqttDiscovery", (char *) "Set MQTT discovery topic", [](Tokens *cmd)-> void {
@@ -274,11 +400,11 @@ void createCommands() {
         for (uint8_t i = 0; i < nextPacket; i++) msgRcvd(radioPackets[i]);
         sysTable->dump2W();
     });
-    // Unnecessary just for test
+*/    // Unnecessary just for test
     Cmd::addHandler((char *) "discover28", (char *) "discover28", [](Tokens *cmd)-> void {
-        IOHC::iohcCozyDevice2W::getInstance()->cmd(IOHC::DeviceButton::discover28, nullptr);
+        IOHC::iohcOtherDevice2W::getInstance()->cmd(IOHC::Other2WButton::discover28, nullptr);
     });
-*/
+
     Cmd::addHandler((char *) "discover2A", (char *) "discover2A", [](Tokens *cmd)-> void {
         IOHC::iohcOtherDevice2W::getInstance()->cmd(IOHC::Other2WButton::discover2A, nullptr);
     });
@@ -356,6 +482,10 @@ bool addHandler(char *cmd, char *description, void (*handler)(Tokens*)) {
 char *cmdReceived(bool echo) {
   _avail = Serial.available();
   if (_avail) {
+    if ((_len + _avail) > 512) {
+        _avail = 512 - _len;
+        Serial.println("Too much data, truncating it at 512 bytes");
+    }
     _len += Serial.readBytes(&_rxbuffer[_len], _avail);
     if (echo) {
       _rxbuffer[_len] = '\0';
