@@ -368,7 +368,7 @@ static void handleMqttConnectImpl() {
     publishFreeMemDiscovery();
     publishIpAddressDiscovery();
     publishWifiStrengthDiscovery();
-    // Discovery van de â€˜frameâ€™ sensor eerst, zodat state pub direct een entity heeft
+    // Discovery van de ‘frame’ sensor eerst, zodat state pub direct een entity heeft
     publishIohcFrameDiscovery();
     publishRadioLogDiscovery();
     const auto &remotes = IOHC::iohcRemote1W::getInstance()->getRemotes();
