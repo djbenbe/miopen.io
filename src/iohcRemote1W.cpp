@@ -36,6 +36,14 @@ namespace IOHC {
     iohcRemote1W* iohcRemote1W::_iohcRemote1W = nullptr;
     static constexpr uint32_t DEFAULT_TRAVEL_TIME_SEC = 10;
 
+    static void broadcastWebDeviceAction(const iohcRemote1W::remote &r, const char *action) {
+#if defined(WEBSERVER)
+        const std::string id = bytesToHexString(r.node, sizeof(r.node));
+        broadcastDeviceAction(id.c_str(), action,
+                              static_cast<int>(std::round(r.positionTracker.getPosition())),
+                              static_cast<int>(std::round(r.targetPosition)), "gateway");
+#endif
+    }
     static void positionTaskLoop(void *arg) {
         auto *inst = static_cast<iohcRemote1W *>(arg);
         while (true) {
@@ -319,6 +327,7 @@ namespace IOHC {
                             r.positionTracker.startOpening();
                             r.movement = remote::Movement::Opening;
                             r.targetPosition = 100.0f;
+                            broadcastWebDeviceAction(r, "OPENING");
 #if defined(MQTT)
                             {
                                 std::string id = bytesToHexString(r.node, sizeof(r.node));
@@ -335,6 +344,7 @@ namespace IOHC {
                             r.positionTracker.startClosing();
                             r.movement = remote::Movement::Closing;
                             r.targetPosition = 0.0f;
+                            broadcastWebDeviceAction(r, "CLOSING");
 #if defined(MQTT)
                             {
                                 std::string id = bytesToHexString(r.node, sizeof(r.node));
@@ -351,6 +361,7 @@ namespace IOHC {
                             r.positionTracker.stop();
                             r.movement = remote::Movement::Idle;
                             r.targetPosition = r.positionTracker.getPosition();
+                            broadcastWebDeviceAction(r, "STOP");
 #if defined(MQTT)
                             {
                                 std::string id = bytesToHexString(r.node, sizeof(r.node));
@@ -406,6 +417,7 @@ namespace IOHC {
                                 r.movement = remote::Movement::Idle;
                             }
                             r.targetPosition = percent;
+                            broadcastWebDeviceAction(r, remoteButtonToString(cmd));
                             break;
                         }
                         case RemoteButton::Absolute: {
@@ -446,6 +458,7 @@ namespace IOHC {
                                 r.movement = remote::Movement::Idle;
                             }
                             r.targetPosition = target;
+                            broadcastWebDeviceAction(r, remoteButtonToString(cmd));
                             break;
                         }
                         case RemoteButton::Mode1:{
@@ -967,6 +980,7 @@ const std::vector<iohcRemote1W::remote>& iohcRemote1W::getRemotes() const {
                 r.positionTracker.startOpening();
                 r.movement = remote::Movement::Opening;
                 r.targetPosition = 100.0f;
+                            broadcastWebDeviceAction(r, "OPENING");
 #if defined(MQTT)
                 {
                     std::string id = bytesToHexString(r.node, sizeof(r.node));
@@ -981,6 +995,7 @@ const std::vector<iohcRemote1W::remote>& iohcRemote1W::getRemotes() const {
                 r.positionTracker.startClosing();
                 r.movement = remote::Movement::Closing;
                 r.targetPosition = 0.0f;
+                            broadcastWebDeviceAction(r, "CLOSING");
 #if defined(MQTT)
                 {
                     std::string id = bytesToHexString(r.node, sizeof(r.node));
@@ -995,6 +1010,7 @@ const std::vector<iohcRemote1W::remote>& iohcRemote1W::getRemotes() const {
                 r.positionTracker.stop();
                 r.movement = remote::Movement::Idle;
                 r.targetPosition = r.positionTracker.getPosition();
+                            broadcastWebDeviceAction(r, "STOP");
 #if defined(MQTT)
                 {
                     std::string id = bytesToHexString(r.node, sizeof(r.node));
