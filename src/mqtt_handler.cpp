@@ -368,7 +368,7 @@ static void handleMqttConnectImpl() {
     publishFreeMemDiscovery();
     publishIpAddressDiscovery();
     publishWifiStrengthDiscovery();
-    // Discovery van de ‘frame’ sensor eerst, zodat state pub direct een entity heeft
+    // Publish frame discovery before state updates so Home Assistant has an entity.
     publishIohcFrameDiscovery();
     publishRadioLogDiscovery();
     const auto &remotes = IOHC::iohcRemote1W::getInstance()->getRemotes();
