@@ -644,6 +644,14 @@ Every 9 -> 0x20 12:41:28.171 > (23) 1W S 1 E 1  FROM B60D1A TO 00003F CMD 20 <  
                     //     packet->payload.packet.msg.p0x00_all.hmac[i] = hmac[i];
                     // }
                     packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
+                    // 1W has no acknowledgement. When enabled, send extra bursts to
+                    // improve reliability for devices that sometimes miss a command.
+                    if (r.repeatOnNoResponse) {
+                        packet->repeat = 8;
+                        packet->repeatTime = 40;
+                        Serial.printf("1W repeatOnNoResponse active for %s: repeats=%u\n",
+                                      r.name.c_str(), packet->repeat);
+                    }
 
                     digitalWrite(RX_LED, digitalRead(RX_LED) ^ 1);
 

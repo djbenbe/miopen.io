@@ -322,6 +322,7 @@ void handleApiDevices(AsyncWebServerRequest *request, JsonArray &root) {
     deviceObj["position"] = r.positionTracker.getPosition();
     deviceObj["travel_time"] = r.travelTime;
     deviceObj["paired"] = r.paired;
+    deviceObj["active"] = r.paired;
     deviceObj["repeatOnNoResponse"] = r.repeatOnNoResponse;
   }
 
