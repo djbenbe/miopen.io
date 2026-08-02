@@ -147,7 +147,7 @@
                             defaultTiming: device.travel_time,
                             showBoolean: true,
                             booleanLabel: app.i18nText("popup.active", "Active"),
-                            defaultBoolean: !!device.active,
+                            defaultBoolean: typeof device.active === "boolean" ? device.active : !!device.paired,
                             blockDestructiveWhenBoolean: true,
                             showRepeatOnNoResponse: true,
                             repeatOnNoResponseLabel: app.i18nText(
