@@ -41,6 +41,9 @@
             app.elements.mqttPasswordInput.value = config.password || "";
             app.elements.mqttPortInput.value = config.port || "";
             app.elements.mqttDiscoveryInput.value = config.discovery || "";
+            if (app.elements.mqttAllowAnonymousInput) {
+                app.elements.mqttAllowAnonymousInput.checked = !!config.allowAnonymous;
+            }
         } catch (error) {
             console.error("Error fetching MQTT config", error);
         }
@@ -57,7 +60,8 @@
                 server: app.elements.mqttServerInput.value,
                 password: app.elements.mqttPasswordInput.value,
                 port: app.elements.mqttPortInput.value,
-                discovery: app.elements.mqttDiscoveryInput.value
+                discovery: app.elements.mqttDiscoveryInput.value,
+                allowAnonymous: !!(app.elements.mqttAllowAnonymousInput && app.elements.mqttAllowAnonymousInput.checked)
             });
             setSettingsStatus(
                 app,
@@ -123,6 +127,9 @@
             app.elements.networkDns1Input.value = config.dns1 || "";
             app.elements.networkDns2Input.value = config.dns2 || "";
             app.elements.networkSntpInput.value = config.sntp || "";
+            if (app.elements.networkTzInput) {
+                app.elements.networkTzInput.value = config.tz || "CET-1CEST,M3.5.0,M10.5.0/3";
+            }
             setNetworkStatus(app, config.connected ? "Network config loaded" : "Network config loaded, WiFi not connected", !config.connected);
         } catch (error) {
             console.error("Error fetching network config", error);
@@ -144,7 +151,8 @@
                 gateway: app.elements.networkGatewayInput.value,
                 dns1: app.elements.networkDns1Input.value,
                 dns2: app.elements.networkDns2Input.value,
-                sntp: app.elements.networkSntpInput.value
+                sntp: app.elements.networkSntpInput.value,
+                tz: app.elements.networkTzInput ? app.elements.networkTzInput.value : ""
             });
             setNetworkStatus(app, result.message || "Network config saved, rebooting");
             setSettingsStatus(app, result.message || "Network config saved, rebooting");
@@ -477,14 +485,12 @@
                 } catch (_error) {
                     result = {};
                 }
-
                 if (xhr.status >= 200 && xhr.status < 300) {
                     resolve(result);
-                    return;
+                } else {
+                    reject(new Error(result.message || ("HTTP error " + xhr.status)));
                 }
-                reject(new Error(result.message || ("HTTP error " + xhr.status)));
             });
-
             xhr.addEventListener("error", function () {
                 if (uploadComplete && (url === "/api/firmware" || url === "/api/filesystem")) {
                     resolve({ message: "Upload sent to device, rebooting..." });
@@ -500,24 +506,22 @@
             xhr.send(formData);
         });
     }
+
     async function uploadSelectedFile(app, input, url, missingMessage, successMessage, refreshFn) {
         const file = input.files[0];
         if (!file) {
-            setSettingsStatus(app, missingMessage, true, 8000);
+            setSettingsStatus(app, missingMessage, true);
             return;
         }
 
-        setSettingsStatus(app, "Upload started...", false, 20000);
         try {
+            setSettingsStatus(app, "Upload started...", false, 20000);
             const result = await uploadFileWithProgress(file, url, function (percent) {
-                const message = percent >= 100
-                    ? "Upload sent to device, writing flash..."
-                    : "Uploading " + percent + "%...";
+                const message = percent >= 100 ? "Upload sent to device, writing flash..." : "Uploading " + percent + "%...";
                 setSettingsStatus(app, message, false, 20000);
             });
             const message = result.message || successMessage;
             setSettingsStatus(app, message, false, 20000);
-            input.value = "";
             if (refreshFn) {
                 await refreshFn();
             }
@@ -532,19 +536,30 @@
         const panels = Array.from(document.querySelectorAll("[data-settings-panel]"));
 
         function activate(name) {
+            const exists = tabs.some(function (tab) {
+                return tab.dataset.settingsTab === name;
+            });
+            const activeName = exists ? name : "integration";
             tabs.forEach(function (tab) {
-                tab.classList.toggle("active", tab.dataset.settingsTab === name);
+                tab.classList.toggle("active", tab.dataset.settingsTab === activeName);
             });
             panels.forEach(function (panel) {
-                const isActive = panel.dataset.settingsPanel === name;
+                const isActive = panel.dataset.settingsPanel === activeName;
                 panel.classList.toggle("active", isActive);
                 panel.hidden = !isActive;
             });
+            return activeName;
         }
+
+        window.activateSettingsTab = activate;
 
         tabs.forEach(function (tab) {
             tab.addEventListener("click", function () {
-                activate(tab.dataset.settingsTab);
+                const activeName = activate(tab.dataset.settingsTab);
+                const nextHash = "#/settings/" + activeName;
+                if (window.location.hash !== nextHash) {
+                    history.pushState(null, "", nextHash);
+                }
             });
         });
 
@@ -572,12 +587,14 @@
 
         const restartButton = document.getElementById("settings-restart");
         if (restartButton) {
-            restartButton.addEventListener("click", function () {
-                setSettingsStatus(
-                    app,
-                    app.i18nText("status.restart_unavailable", "Restart is not available from this firmware build"),
-                    true
-                );
+            restartButton.addEventListener("click", async function () {
+                setSettingsStatus(app, app.i18nText("status.restart_scheduled", "Restart scheduled"), false, 20000);
+                try {
+                    const result = await window.MiOpenApi.postJson("/api/restart", {});
+                    setSettingsStatus(app, result.message || app.i18nText("status.restart_scheduled", "Restart scheduled"), false, 20000);
+                } catch (error) {
+                    setSettingsStatus(app, error.message || app.i18nText("status.restart_failed", "Restart failed"), true, 20000);
+                }
             });
         }
     }

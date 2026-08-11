@@ -1,0 +1,40 @@
+<div class="left">
+          <section id="status-section">
+            <div class="title">
+              <h2 data-i18n="section.status_logs">Status / Log</h2>
+              <select id="select-log">
+                <option value="all" data-i18n="filter.all">All</option>
+                <option value="info" data-i18n="filter.info">Info</option>
+                <option value="warning" data-i18n="filter.warning">
+                  Warning
+                </option>
+                <option value="error" data-i18n="filter.error">Error</option>
+              </select>
+            </div>
+            <div class="card">
+              <div class="device-selection">
+                <label for="device-select" data-i18n="label.select_device">
+                  Select Device:
+                </label>
+                <select id="device-select"></select>
+                <label for="last-address" data-i18n="label.last_address">
+                  Last Address:
+                </label>
+                <input id="last-address" readonly="readonly" />
+              </div>
+              <div id="status-messages"></div>
+              <div class="send-messages">
+                <input
+                  id="command-input"
+                  data-i18n-placeholder="placeholder.type_here"
+                  placeholder="Typ hier..."
+                  autocomplete="off"
+                />
+                <select id="suggestions"></select>
+                <button id="send-command-button" data-i18n="button.send">
+                  Send
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>

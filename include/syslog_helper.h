@@ -8,6 +8,12 @@
 #pragma once
 #include <Arduino.h>
 
+// Start SNTP/NTP time sync after WiFi is connected. Non-blocking.
+void startSyslogTimeSync();
+
+// Return true when the system clock has been set by NTP/SNTP.
+bool isSyslogTimeSynced();
+
 // Initialize UDP + target IP from user_config.h
 void initSyslog();
 

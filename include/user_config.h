@@ -38,6 +38,7 @@ inline std::string mqtt_user = "mosquitto";
 inline std::string mqtt_password = "";
 inline std::string mqtt_discovery_topic = "homeassistant";
 inline uint16_t mqtt_port = 1883;
+inline bool mqtt_allow_anonymous = false;
 
 #define SYSLOG                       // Comment out to disable remote syslog
 #define SYSLOG_SECRET "7a06c4100d82ed8d"  // Shared token — Graylog drops messages without it

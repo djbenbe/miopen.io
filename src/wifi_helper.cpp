@@ -122,6 +122,7 @@ static void handleWifiConnected() {
         ensureWebServerStarted();
         onMqttAfterWifi();
 #if defined(SYSLOG)
+        startSyslogTimeSync();
         resetSyslog();
         initSyslog();
 #endif

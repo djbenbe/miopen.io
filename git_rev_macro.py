@@ -1,10 +1,10 @@
-import subprocess
 import os
+import subprocess
 
 def get_version():
     try:
         return subprocess.check_output(
-            ["git", "describe", "--tags", "--always", "--dirty"],
+            ["git", "describe", "--tags", "--always"],
             stderr=subprocess.DEVNULL
         ).decode().strip()
     except Exception:
@@ -21,6 +21,7 @@ def get_branch():
             return branch
     except Exception:
         pass
+
     return os.environ.get("GITHUB_REF_NAME") or os.environ.get("GITHUB_HEAD_REF") or "unknown"
 
 

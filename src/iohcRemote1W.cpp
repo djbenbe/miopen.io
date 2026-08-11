@@ -25,6 +25,7 @@
 #include <nvs_helpers.h>
 #include <cmath>
 #include <algorithm>
+#include <freertos/semphr.h>
 #if defined(MQTT)
 #include <mqtt_handler.h>
 #endif
@@ -35,6 +36,20 @@
 namespace IOHC {
     iohcRemote1W* iohcRemote1W::_iohcRemote1W = nullptr;
     static constexpr uint32_t DEFAULT_TRAVEL_TIME_SEC = 10;
+    // Serializes save() against itself: command handlers and the position
+    // tracker task can both save /1W.json. Without this, overlapping writes can
+    // race on the same temporary file and corrupt or fail the rename.
+    static SemaphoreHandle_t saveMutex = xSemaphoreCreateMutex();
+
+    class MutexGuard {
+    public:
+        explicit MutexGuard(SemaphoreHandle_t m) : mutex(m) { xSemaphoreTake(mutex, portMAX_DELAY); }
+        ~MutexGuard() { xSemaphoreGive(mutex); }
+        MutexGuard(const MutexGuard &) = delete;
+        MutexGuard &operator=(const MutexGuard &) = delete;
+    private:
+        SemaphoreHandle_t mutex;
+    };
 
     static void broadcastWebDeviceAction(const iohcRemote1W::remote &r, const char *action) {
 #if defined(WEBSERVER)
@@ -816,6 +831,7 @@ Every 9 -> 0x20 12:41:28.171 > (23) 1W S 1 E 1  FROM B60D1A TO 00003F CMD 20 <  
         return true;
     }
    bool iohcRemote1W::save() {
+        MutexGuard guard(saveMutex);
         if (remotes.empty()) {
             Serial.printf("Refusing to save empty 1W remote list to %s\n", IOHC_1W_REMOTE);
             return false;

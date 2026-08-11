@@ -34,8 +34,8 @@ static TaskHandle_t s_mqttPostConnectTask = nullptr;
 static std::atomic<bool> s_heartbeatEnabled{false};
 static std::atomic<uint32_t> s_nextHeartbeatAtMs{0};
 static uint32_t s_lastMqttConnectAttemptMs = 0;
-static constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
-static constexpr uint32_t MQTT_CONNECT_TIMEOUT_MS = 15000;
+static constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 15000;
+static constexpr uint32_t MQTT_CONNECT_TIMEOUT_MS = 20000;
 
 static void mqttSchedulerTask(void*);
 static void publishIohcFrameDiscovery();
@@ -130,10 +130,17 @@ void initMqtt() {
     if (!nvs_read_u16(NVS_KEY_MQTT_PORT, mqtt_port)) {
         nvs_write_u16(NVS_KEY_MQTT_PORT, mqtt_port);
     }
+    if (!nvs_read_bool(NVS_KEY_MQTT_ANON, mqtt_allow_anonymous)) {
+        nvs_write_bool(NVS_KEY_MQTT_ANON, mqtt_allow_anonymous);
+    }
 
     mqttClient.setWill(AVAILABILITY_TOPIC, 0, true, "offline");
     mqttClient.setClientId(mqtt_client_id.c_str());
-    mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+    if (mqtt_allow_anonymous) {
+        mqttClient.setCredentials(nullptr, nullptr);
+    } else {
+        mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+    }
     mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
     mqttClient.onConnect(onMqttConnect);
     mqttClient.onDisconnect(onMqttDisconnect);
@@ -409,6 +416,13 @@ void connectToMqtt() {
         Serial.println("MQTT server not configured");
         return;
     }
+    if (!mqtt_allow_anonymous && (mqtt_user.empty() || mqtt_password.empty())) {
+        Serial.println("MQTT username/password required; anonymous MQTT is disabled");
+        addLogMessage("MQTT username/password required; anonymous MQTT is disabled");
+        mqttStatus = ConnState::Disconnected;
+        updateDisplayStatus();
+        return;
+    }
     s_lastMqttConnectAttemptMs = millis();
     Serial.printf("Connecting to MQTT at %s:%u...\n", mqtt_server.c_str(), mqtt_port);
     addLogMessage(String("Connecting to MQTT at ") + mqtt_server.c_str() + ":" + String(mqtt_port));
@@ -451,6 +465,7 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
     Serial.println(static_cast<uint8_t>(reason));
     addLogMessage(String("Disconnected from MQTT (reason ") + String(static_cast<uint8_t>(reason)) + ")");
     mqttStatus = ConnState::Disconnected;
+    s_lastMqttConnectAttemptMs = millis();
     updateDisplayStatus();
     stopHeartbeat();
 }

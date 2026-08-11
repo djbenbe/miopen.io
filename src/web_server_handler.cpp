@@ -683,11 +683,14 @@ static void scheduleRestart(const char *taskName) {
   if (!rebootScheduled.exchange(true)) {
     xTaskCreate(
       [](void *) {
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        vTaskDelay(pdMS_TO_TICKS(1200));
+        ws.closeAll(1001, "restarting");
+        ws.cleanupClients();
+        vTaskDelay(pdMS_TO_TICKS(1800));
         ESP.restart();
       },
       taskName,
-      2048,
+      3072,
       nullptr,
       5,
       nullptr
@@ -713,6 +716,13 @@ static bool isValidIpString(const String &value) {
   IPAddress ip;
   return value.length() > 0 && ip.fromString(value);
 }
+void handleApiRestart(AsyncWebServerRequest *request, JsonObject &doc, JsonObject &root) {
+  (void)request;
+  (void)doc;
+  root["success"] = true;
+  root["message"] = "Restart scheduled";
+  scheduleRestart("web-reboot");
+}
 void handleApiNetworkGet(AsyncWebServerRequest *request, JsonObject &root) {
   root["hostname"] = WiFi.getHostname() ? WiFi.getHostname() : "MiOpenIO";
   root["dhcp"] = true;
@@ -722,7 +732,14 @@ void handleApiNetworkGet(AsyncWebServerRequest *request, JsonObject &root) {
   root["gateway"] = WiFi.gatewayIP().toString();
   root["dns1"] = WiFi.dnsIP(0).toString();
   root["dns2"] = WiFi.dnsIP(1).toString();
-  root["sntp"] = "pool.ntp.org";
+
+  std::string sntp = "pool.ntp.org";
+  nvs_read_string(NVS_KEY_NET_SNTP, sntp);
+  root["sntp"] = sntp.c_str();
+
+  std::string tz = "CET-1CEST,M3.5.0,M10.5.0/3";
+  nvs_read_string(NVS_KEY_NET_TZ, tz);
+  root["tz"] = tz.c_str();
 }
 
 
@@ -735,7 +752,8 @@ void handleApiNetworkSet(AsyncWebServerRequest *request, JsonObject &doc, JsonOb
   String dns1 = doc["dns1"] | "";
   String dns2 = doc["dns2"] | "";
   String sntp = doc["sntp"] | "";
-  hostname.trim(); ip.trim(); mask.trim(); gateway.trim(); dns1.trim(); dns2.trim(); sntp.trim();
+  String tz = doc["tz"] | "";
+  hostname.trim(); ip.trim(); mask.trim(); gateway.trim(); dns1.trim(); dns2.trim(); sntp.trim(); tz.trim();
 
   if (!isValidHostname(hostname)) {
     request->send(400, "application/json", "{\"success\":false,\"message\":\"Invalid hostname\"}");
@@ -761,6 +779,7 @@ void handleApiNetworkSet(AsyncWebServerRequest *request, JsonObject &doc, JsonOb
   nvs_write_string(NVS_KEY_NET_DNS1, std::string(dns1.c_str()));
   nvs_write_string(NVS_KEY_NET_DNS2, std::string(dns2.c_str()));
   nvs_write_string(NVS_KEY_NET_SNTP, std::string(sntp.c_str()));
+  nvs_write_string(NVS_KEY_NET_TZ, std::string(tz.c_str()));
 
   root["success"] = true;
   root["message"] = "Network config saved, rebooting";
@@ -1065,6 +1084,7 @@ void handleApiMqttGet(AsyncWebServerRequest *request, JsonObject &root) {
   root["discovery"] = mqtt_discovery_topic.c_str();
   root["clientId"] = mqtt_client_id.c_str();
   root["port"] = mqtt_port;
+  root["allowAnonymous"] = mqtt_allow_anonymous;
 }
 
 void handleApiMqttSet(AsyncWebServerRequest *request, JsonObject &doc, JsonObject &root) {
@@ -1073,6 +1093,7 @@ void handleApiMqttSet(AsyncWebServerRequest *request, JsonObject &doc, JsonObjec
   String password = doc["password"] | "";
   String discovery = doc["discovery"] | "";
   String clientId = doc["clientId"] | "";
+  bool allowAnonymous = doc["allowAnonymous"] | mqtt_allow_anonymous;
   int portValue = -1;
   if (doc["port"].is<JsonVariant>()) {
     JsonVariant portVariant = doc["port"];
@@ -1118,10 +1139,25 @@ void handleApiMqttSet(AsyncWebServerRequest *request, JsonObject &doc, JsonObjec
     mqttChanged = true;
   }
 
+  if (mqtt_allow_anonymous != allowAnonymous) {
+    mqtt_allow_anonymous = allowAnonymous;
+    nvs_write_bool(NVS_KEY_MQTT_ANON, mqtt_allow_anonymous);
+    mqttChanged = true;
+  }
+
+  if (!mqtt_allow_anonymous && (mqtt_user.empty() || mqtt_password.empty())) {
+    request->send(400, "application/json", "{\"success\":false,\"message\":\"MQTT username and password are required\"}");
+    return;
+  }
+
   if (mqttChanged) {
     mqttClient.disconnect();
     mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
-    mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+    if (mqtt_allow_anonymous) {
+      mqttClient.setCredentials(nullptr, nullptr);
+    } else {
+      mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+    }
     mqttClient.setClientId(mqtt_client_id.c_str());
   }
 
@@ -1145,11 +1181,14 @@ void handleFirmwareUpdate(AsyncWebServerRequest *request) {
     if (!rebootScheduled.exchange(true)) {
       xTaskCreate(
         [](void *) {
-          vTaskDelay(pdMS_TO_TICKS(3000));
-          ESP.restart();
+          vTaskDelay(pdMS_TO_TICKS(1200));
+        ws.closeAll(1001, "restarting");
+        ws.cleanupClients();
+        vTaskDelay(pdMS_TO_TICKS(1800));
+        ESP.restart();
         },
         "reboot",
-        2048,
+        3072,
         nullptr,
         5,
         nullptr
@@ -1194,11 +1233,14 @@ void handleFilesystemUpdate(AsyncWebServerRequest *request) {
     if (!rebootScheduled.exchange(true)) {
       xTaskCreate(
         [](void *) {
-          vTaskDelay(pdMS_TO_TICKS(3000));
-          ESP.restart();
+          vTaskDelay(pdMS_TO_TICKS(1200));
+        ws.closeAll(1001, "restarting");
+        ws.cleanupClients();
+        vTaskDelay(pdMS_TO_TICKS(1800));
+        ESP.restart();
         },
         "reboot",
-        2048,
+        3072,
         nullptr,
         5,
         nullptr
@@ -1265,6 +1307,7 @@ void setupWebServer() {
 #if defined(MQTT)
   server.on("/api/mqtt", HTTP_GET, jsonGet(handleApiMqttGet));
 #endif
+  server.on("/api/restart", HTTP_POST, jsonPost(handleApiRestart));
   server.on("/api/command", HTTP_POST, jsonPost(handleApiCommand));
   server.on("/api/action", HTTP_POST, jsonPost(handleApiAction));
   server.on("/api/wifi", HTTP_POST, jsonPost(handleApiWifiSet));

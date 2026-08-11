@@ -16,8 +16,14 @@
 
     async function fetchAndDisplayRemotes(app) {
         const tbody = document.querySelector("#remote-table tbody");
+        if (!tbody) {
+            return [];
+        }
 
         try {
+            if (!app.state.devicesCache.length && typeof app.fetchAndDisplayDevices === "function") {
+                await app.fetchAndDisplayDevices();
+            }
             const remotes = await window.MiOpenApi.requestJson("/api/remotes");
             tbody.textContent = "";
 

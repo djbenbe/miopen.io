@@ -30,7 +30,7 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, DISPLAY_OLED_RST);
 DisplayBuffer displayBuffer;
 SemaphoreHandle_t displayBufferMutex = xSemaphoreCreateMutex();
 
@@ -156,8 +156,8 @@ bool initDisplay() {
         displayEnabled = enabled;
     }
 
-    Wire.begin(OLED_SDA, OLED_SCL);
-    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
+    Wire.begin(DISPLAY_OLED_SDA, DISPLAY_OLED_SCL);
+    if (!display.begin(SSD1306_SWITCHCAPVCC, DISPLAY_OLED_ADDRESS)) {
         return false;
     }
 
