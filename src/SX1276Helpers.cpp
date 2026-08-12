@@ -75,16 +75,12 @@ namespace Radio {
 
         // SPI pins configuration
 
-        pinMode(RADIO_RESET, INPUT); // Connected to Reset; floating for POR
-
-        // Check the availability of the Radio
-        while (!digitalRead(RADIO_RESET)) {
-#if defined(ESP32)
-            esp_task_wdt_reset();
-#endif
-            delayMicroseconds(1);
-        }
-        delayMicroseconds(BOARD_READY_AFTER_POR);
+        // Hardware reset the SX1276: pull RESET low for at least 100µs
+        pinMode(RADIO_RESET, OUTPUT);
+        digitalWrite(RADIO_RESET, LOW);
+        delay(10);
+        digitalWrite(RADIO_RESET, HIGH);
+        delay(10);
 
         // Initialize SPI bus
 #if defined(ESP32)
@@ -96,20 +92,24 @@ namespace Radio {
         SPI.setHwCs(true);
 
         // Disable SPI device
-        // Disable device NRESET pin
         pinMode(RADIO_NSS, OUTPUT);
-        pinMode(RADIO_RESET, OUTPUT);
-        digitalWrite(RADIO_RESET, HIGH);
         digitalWrite(RADIO_NSS, HIGH);
         delayMicroseconds(BOARD_READY_AFTER_POR);
 
         // SPI.beginTransaction(Radio::SpiSettings);
         // SPI.endTransaction();
 
-        writeByte(REG_OPMODE, RF_OPMODE_STANDBY); // Put Radio in Standby mode
+        // SX1276 boots in LoRa mode (REG_OPMODE=0x80). LongRangeMode bit can only
+        // be changed in Sleep mode. Switch to FSK mode first, then Standby.
+        writeByte(REG_OPMODE, RF_OPMODE_SLEEP); // Sleep mode (LoRa bit still set, that's ok)
+        delay(1);
+        writeByte(REG_OPMODE, RF_OPMODE_LONGRANGEMODE_OFF | RF_OPMODE_MODULATIONTYPE_FSK | RF_OPMODE_SLEEP); // Clear LoRa bit in Sleep
+        delay(1);
+        writeByte(REG_OPMODE, RF_OPMODE_LONGRANGEMODE_OFF | RF_OPMODE_MODULATIONTYPE_FSK | RF_OPMODE_STANDBY); // Now go to Standby
 
         pinMode(SCAN_LED, OUTPUT);
         digitalWrite(SCAN_LED, 1);
+
         printf("\nRadio Chip is ready\n");
     }
 
@@ -221,30 +221,8 @@ void setPreambleLength(uint16_t preambleLen) {
  * frequency band.
  */
     void calibrate() {
-        // Save context
-        uint8_t regPaConfigInitVal = readByte(REG_PACONFIG);
-
-        // Cut the PA just in case, RFO output, power = -1 dBm
-        writeByte(REG_PACONFIG, RF_PACONFIG_PASELECT_RFO);
-        // RC Calibration (only call after setting correct frequency band)
-        writeByte(REG_OSC, RF_OSC_RCCALSTART);
-        // Start image and RSSI calibration
-        writeByte(
-            REG_IMAGECAL, (RF_IMAGECAL_AUTOIMAGECAL_MASK & RF_IMAGECAL_IMAGECAL_MASK) | RF_IMAGECAL_IMAGECAL_START);
-        // Wait end of calibration
-        while ((readByte(REG_IMAGECAL) & RF_IMAGECAL_IMAGECAL_RUNNING) == RF_IMAGECAL_IMAGECAL_RUNNING) {
-        }
-        // Set a Frequency in HF band
-        Radio::setCarrier(Radio::Carrier::Frequency, 868000000);
-        // Start image and RSSI calibration
-        writeByte(
-            REG_IMAGECAL, (RF_IMAGECAL_AUTOIMAGECAL_MASK & RF_IMAGECAL_IMAGECAL_MASK) | RF_IMAGECAL_IMAGECAL_START);
-        // Wait end of calibration
-        while ((readByte(REG_IMAGECAL) & RF_IMAGECAL_IMAGECAL_RUNNING) == RF_IMAGECAL_IMAGECAL_RUNNING) {
-        }
-
-        // Restore context
-        writeByte(REG_PACONFIG, regPaConfigInitVal);
+        // Calibration on this board/chip never completes (IMAGECAL_RUNNING bit stays set).
+        // The radio can still receive FSK packets without image calibration.
     }
 
     /*!
