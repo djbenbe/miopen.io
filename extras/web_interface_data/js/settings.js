@@ -11,6 +11,73 @@
         }
     }
 
+    function getGitHubUpdateStatusElement() {
+        return document.getElementById("github-update-status");
+    }
+
+    function setGitHubUpdateStatus(message, isError) {
+        const status = getGitHubUpdateStatusElement();
+        if (status) {
+            status.textContent = message;
+            status.classList.toggle("error", !!isError);
+        }
+        if (typeof window.showToast === "function") {
+            window.showToast(message, !!isError, 12000);
+        }
+    }
+
+    function shortCommitFromVersion(version) {
+        const match = String(version || "").match(/g([0-9a-f]{7,})/i);
+        return match ? match[1].toLowerCase() : "";
+    }
+
+    function shortHash(value) {
+        const match = String(value || "").match(/[0-9a-f]{7,40}/i);
+        return match ? match[0].substring(0, 7).toLowerCase() : "";
+    }
+
+    async function checkGithubUpdate(app) {
+        const branchSelect = document.getElementById("github-update-branch");
+        setGitHubUpdateStatus("Checking GitHub update...", false);
+        try {
+            const info = await window.MiOpenApi.requestJson("/api/info");
+            const selectedBranch = branchSelect ? branchSelect.value : "auto";
+            const branch = selectedBranch === "auto" ? (info.branch || "Beta") : selectedBranch;
+            const board = info.board || "";
+            const response = await fetch("https://api.github.com/repos/djbenbe/miopen.io/releases/tags/" + encodeURIComponent(branch + "-latest"), {
+                headers: { "Accept": "application/vnd.github+json" }
+            });
+            if (!response.ok) {
+                throw new Error("GitHub HTTP " + response.status + " for " + branch + "-latest");
+            }
+            const release = await response.json();
+            const assets = Array.isArray(release.assets) ? release.assets : [];
+            const boardAssets = board ? assets.filter(function (asset) {
+                return asset.name.indexOf(board) === 0;
+            }) : assets;
+            const currentShort = shortCommitFromVersion(info.version);
+            const releaseCommit = shortHash(release.target_commitish);
+            const sameCommit = currentShort && releaseCommit && releaseCommit.indexOf(currentShort) === 0;
+            const assetText = boardAssets.length ? boardAssets.length + " asset(s) for " + board : "no matching board assets";
+            let updateText = "Latest release: ";
+            if (sameCommit) {
+                updateText = "Already on latest ";
+            } else if (currentShort && releaseCommit) {
+                updateText = "Update available: ";
+            } else if (currentShort && !releaseCommit) {
+                updateText = "Latest release found, commit check unavailable: ";
+            }
+            setGitHubUpdateStatus(
+                updateText + release.tag_name +
+                " (" + assetText +
+                ", current " + (info.version || "unknown") +
+                ", latest " + (releaseCommit || release.target_commitish || "unknown") + ")",
+                !boardAssets.length
+            );
+        } catch (error) {
+            setGitHubUpdateStatus("GitHub update check failed: " + (error.message || error), true);
+        }
+    }
 
     function setDisplayStatus(app, message, isError) {
         if (!app.elements.displayStatus) {
@@ -582,6 +649,13 @@
         if (app.elements.fallbackSaveButton) {
             app.elements.fallbackSaveButton.addEventListener("click", function () {
                 app.saveFallbackConfig();
+            });
+        }
+
+        const githubUpdateCheckButton = document.getElementById("github-update-check");
+        if (githubUpdateCheckButton) {
+            githubUpdateCheckButton.addEventListener("click", function () {
+                checkGithubUpdate(app);
             });
         }
 
