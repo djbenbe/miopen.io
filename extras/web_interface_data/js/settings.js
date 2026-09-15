@@ -36,6 +36,28 @@
         return match ? match[0].substring(0, 7).toLowerCase() : "";
     }
 
+    function releaseCommitHash(release) {
+        const fromTarget = shortHash(release && release.target_commitish);
+        if (fromTarget) {
+            return fromTarget;
+        }
+
+        const fromBody = shortHash(release && release.body);
+        if (fromBody) {
+            return fromBody;
+        }
+
+        const assets = Array.isArray(release && release.assets) ? release.assets : [];
+        for (const asset of assets) {
+            const fromAssetName = shortHash(asset && asset.name);
+            if (fromAssetName) {
+                return fromAssetName;
+            }
+        }
+
+        return "";
+    }
+
     function normaliseReleaseBranch(branch) {
         const value = String(branch || "").trim();
         if (value === "master" || value === "dev-main" || value === "Beta") {
@@ -67,9 +89,10 @@
                 return asset.name.indexOf(board) === 0;
             }) : assets;
             const currentShort = shortCommitFromVersion(info.version);
-            const releaseCommit = shortHash(release.target_commitish);
+            const releaseCommit = releaseCommitHash(release);
             const sameCommit = currentShort && releaseCommit && releaseCommit.indexOf(currentShort) === 0;
-            const assetText = boardAssets.length ? boardAssets.length + " asset(s) for " + board : "no matching board assets";
+            const assetTarget = board || "all boards";
+            const assetText = boardAssets.length ? boardAssets.length + " asset(s) for " + assetTarget : "no matching board assets";
             let updateText = "Latest release: ";
             if (sameCommit) {
                 updateText = "Already on latest ";
