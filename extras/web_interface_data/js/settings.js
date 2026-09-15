@@ -36,13 +36,24 @@
         return match ? match[0].substring(0, 7).toLowerCase() : "";
     }
 
+    function normaliseReleaseBranch(branch) {
+        const value = String(branch || "").trim();
+        if (value === "master" || value === "dev-main" || value === "Beta") {
+            return value;
+        }
+        if (value.toLowerCase().indexOf("beta") !== -1) {
+            return "Beta";
+        }
+        return "Beta";
+    }
+
     async function checkGithubUpdate(app) {
         const branchSelect = document.getElementById("github-update-branch");
         setGitHubUpdateStatus("Checking GitHub update...", false);
         try {
             const info = await window.MiOpenApi.requestJson("/api/info");
             const selectedBranch = branchSelect ? branchSelect.value : "auto";
-            const branch = selectedBranch === "auto" ? (info.branch || "Beta") : selectedBranch;
+            const branch = normaliseReleaseBranch(selectedBranch === "auto" ? (info.branch || "Beta") : selectedBranch);
             const board = info.board || "";
             const response = await fetch("https://api.github.com/repos/djbenbe/miopen.io/releases/tags/" + encodeURIComponent(branch + "-latest"), {
                 headers: { "Accept": "application/vnd.github+json" }
