@@ -15,6 +15,7 @@
 */
 
 #include <wifi_helper.h>
+#include <esp_wifi.h>
 #include <oled_display.h>
 #include <user_config.h>
 #include <log_buffer.h>
@@ -25,18 +26,18 @@
 #if defined(SYSLOG)
 #include <syslog_helper.h>
 #endif
-#include <WiFiManager.h>
 #include <ESPmDNS.h>
 #include <TickerUsESP32.h>
 #include <tuple>
 
-const long PORTAL_TIMEOUT = 300000; // 5 minuten = 300.000 ms
 const uint32_t WIFI_NOTIFY_GOT_IP = BIT0;
 const uint32_t WIFI_NOTIFY_DISCONNECTED = BIT1;
 const uint32_t WIFI_NOTIFY_RECONNECT = BIT2;
 static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 10000;
 static constexpr uint32_t WIFI_STACK_RESET_AFTER_MS = 120000;
 static constexpr uint32_t WIFI_RESTART_AFTER_MS = 1800000;
+static constexpr const char *SETUP_AP_SSID = "iohc-setup";
+static constexpr uint8_t SETUP_AP_CHANNEL = 6;
 
 // below variables are thread safe because of the use of a single task that reads/modifies them (except for wifiStatus, but that one has atomic fields)
 TimersUS::TickerUsESP32 wifiReconnectTimer {};
@@ -96,6 +97,9 @@ static void handleWifiConnected() {
         wifiStatus.connectionStatus = ConnState::Connected;
         wifiStatus.rssi = WiFi.RSSI();
         wifiStatus.signalStrengthPercent = rssiToQuality(wifiStatus.rssi);
+        addLogMessage("WiFi connected: " + WiFi.localIP().toString() +
+                      " rssi=" + String(wifiStatus.rssi.load()) +
+                      " quality=" + String(wifiStatus.signalStrengthPercent.load()) + "%");
         s_wifiDisconnectedSinceMs = 0;
         s_lastWiFiReconnectAttemptMs = 0;
         s_lastWiFiStackResetMs = 0;
@@ -131,6 +135,7 @@ static void handleWifiConnected() {
 
 static void configureWifiDisconnected() {
     Serial.println("WiFi: connection lost (event)");
+    addLogMessage("WiFi: connection lost");
     wifiStatus.connectionStatus = ConnState::Disconnected;
     wifiStatus.signalStrengthPercent = 0;
     wifiStatus.rssi = 0;
@@ -320,61 +325,83 @@ static std::tuple<int, int> millisToMinutesAndSeconds(long millis) {
 
 static void runConfigPortal(const std::string& ssid, bool hasWifiConfiguration) {
     if (hasWifiConfiguration) {
-        Serial.println("WiFi: Configured network not found, opening Config Portal...");
+        Serial.println("WiFi: Configured network not found, opening fallback AP...");
+        addLogMessage("WiFi: opening fallback AP");
     } else {
-        Serial.println("WiFi: No WiFi network configured, opening Config Portal...");
+        Serial.println("WiFi: No WiFi network configured, opening fallback AP...");
+        addLogMessage("WiFi: opening setup AP");
     }
 
-    WiFiManager wm;
-
-    applyAdvancedWiFiSettings();
-    wm.setConfigPortalBlocking(false);
-    wm.setDisableConfigPortal(true); // allow config portal shutdown when previous configured wifi comes available.
-    const uint32_t portalTimeoutMs = readFallbackTimeoutMs();
-    if (portalTimeoutMs > 0) {
-        wm.setConfigPortalTimeout(portalTimeoutMs / 1000);
-    }
-    wm.autoConnect("iohc-setup");
-
+    const bool firstSetup = !hasWifiConfiguration;
+    const uint32_t portalTimeoutMs = firstSetup ? 0 : readFallbackTimeoutMs();
     const unsigned long portalStartTime = millis();
+
+    WiFi.disconnect(false, false);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    WiFi.mode(WIFI_AP_STA);
+    esp_wifi_set_max_tx_power(78);
+    WiFi.softAPConfig(IPAddress(192, 168, 4, 1),
+                      IPAddress(192, 168, 4, 1),
+                      IPAddress(255, 255, 255, 0));
+    applySavedNetworkSettings();
+    applyAdvancedWiFiSettings();
+    if (hasWifiConfiguration) {
+        WiFi.begin();
+    }
+
+    bool apStarted = WiFi.softAP(SETUP_AP_SSID, nullptr, SETUP_AP_CHANNEL, false, 4);
+    if (!apStarted) {
+        WiFi.mode(WIFI_AP);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        apStarted = WiFi.softAP(SETUP_AP_SSID, nullptr, SETUP_AP_CHANNEL, false, 4);
+    }
+    if (!apStarted) {
+        Serial.println("WiFi: fallback AP start failed");
+        addLogMessage("WiFi: fallback AP start failed");
+    } else {
+        Serial.print("WiFi: fallback AP started at ");
+        Serial.println(WiFi.softAPIP());
+        addLogMessage("WiFi: setup AP visible as iohc-setup at " + WiFi.softAPIP().toString());
+    }
+
+    ensureWebServerStarted();
+
     bool portalClosed = false;
     while (!portalClosed) {
-        // Keep telling this info to keep it visible on the display
         if (hasWifiConfiguration) {
             displayCustomMessage("WiFi not found.", ssid.c_str());
         } else {
             displayCustomMessage("WiFi not configured.");
         }
         displayCustomMessage("Custom WiFi AP", "iohc-setup");
+        displayCustomMessage("Open", WiFi.softAPIP().toString().c_str());
 
         const long millisRemaining = portalTimeoutMs == 0 ? 0 : static_cast<long>(portalTimeoutMs) - static_cast<long>(millis() - portalStartTime);
         if (portalTimeoutMs > 0) {
-            auto remainingTime = millisToMinutesAndSeconds(millisRemaining);
+            auto remainingTime = millisToMinutesAndSeconds(millisRemaining > 0 ? millisRemaining : 0);
             displayCustomMessage("Remaining time", format("%2dm %02ds", std::get<0>(remainingTime), std::get<1>(remainingTime)).c_str());
         } else {
             displayCustomMessage("Remaining time", "disabled");
         }
 
-        const bool connected = wm.process(); // Required for async config portal handling
+        vTaskDelay(pdMS_TO_TICKS(250));
 
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        if (connected || WiFi.status() == WL_CONNECTED) {
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("WiFi: connected, closing fallback AP");
+            WiFi.softAPdisconnect(true);
+            WiFi.mode(WIFI_STA);
             portalClosed = true;
-
-            if (connected) {
-                // workaround for bug in WiFiManager that causes the config portal webserver not to be shut down correctly (keeps port in use)
-                esp_restart();
-            }
-        } else if (portalTimeoutMs > 0 && millisRemaining < 0) {
-            Serial.println("WiFi: Config portal timeout, closing portal...");
-            portalClosed = true;
-
+        } else if (portalTimeoutMs > 0 && millisRemaining <= 0) {
+            Serial.println("WiFi: fallback AP timeout, closing AP...");
+            WiFi.softAPdisconnect(true);
             if (hasWifiConfiguration) {
-                Serial.printf("WiFi: Device keeps waiting for connection on network: %s. Restart to re-open config portal.\n", ssid.c_str());
+                WiFi.mode(WIFI_STA);
+                Serial.printf("WiFi: Device keeps waiting for connection on network: %s. Restart to re-open fallback AP.\n", ssid.c_str());
             } else {
-                Serial.println("WiFi: Restart the device manually to re-open the config portal!");
+                WiFi.mode(WIFI_AP);
+                Serial.println("WiFi: setup AP remains open because no network is configured");
             }
+            portalClosed = true;
         }
     }
 
@@ -398,9 +425,7 @@ static void wifiWorker(void * pvParameters) {
         }
     }
     if (status != WL_CONNECTED) {
-        if (!hasWifiConfiguration || readFallbackEnabled()) {
-            runConfigPortal(ssid, hasWifiConfiguration);
-        }
+        runConfigPortal(ssid, hasWifiConfiguration);
     }
 
     if (WiFi.status() == WL_CONNECTED) {
