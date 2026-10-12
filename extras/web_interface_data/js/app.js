@@ -428,15 +428,39 @@
             app.fetchAndDisplayDevices();
         });
 
-        setTimeout(function () {
-            window.MiOpenApi.requestJson("/api/info").then(function (info) {
-            const el = document.getElementById("firmware-version");
-            if (el && info.version) {
-                const branch = info.branch ? " (" + info.branch + ")" : "";
-                el.textContent = "Firmware: " + info.version + branch;
+        let footerInfoPending = false;
+        async function refreshFooterInfo() {
+            if (document.hidden || footerInfoPending) return;
+            footerInfoPending = true;
+            const uptime = document.getElementById("system-uptime");
+            const controller = new AbortController();
+            const timeout = setTimeout(function () { controller.abort(); }, 10000);
+            try {
+                const info = await window.MiOpenApi.requestJson("/api/info", { signal: controller.signal });
+                const el = document.getElementById("firmware-version");
+                if (el && info.version) {
+                    const branch = info.branch ? " (" + info.branch + ")" : "";
+                    el.textContent = "Firmware: " + info.version + branch;
+                }
+                if (uptime) {
+                    if (Number.isFinite(info.uptimeMs) && info.uptimeMs >= 0) {
+                        const minutes = Math.floor(info.uptimeMs / 60000);
+                        uptime.textContent = "Uptime: " + Math.floor(minutes / 1440) + "d " +
+                            Math.floor(minutes / 60) % 24 + "h " + minutes % 60 + "m";
+                    } else {
+                        uptime.textContent = "Uptime: --";
+                    }
+                }
+            } catch (error) {
+                if (uptime) uptime.textContent = "Uptime: --";
+            } finally {
+                clearTimeout(timeout);
+                footerInfoPending = false;
             }
-            }).catch(function () {});
-        }, 250);
+        }
+        setTimeout(refreshFooterInfo, 250);
+        setInterval(refreshFooterInfo, 60000);
+        document.addEventListener("visibilitychange", refreshFooterInfo);
 
         if (currentHashPage() === "devices") {
             app.fetchAndDisplayDevices().then(function () {
