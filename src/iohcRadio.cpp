@@ -47,7 +47,7 @@ namespace IOHC {
     volatile iohcRadio::RadioState iohcRadio::radioState = iohcRadio::RadioState::IDLE;
     TaskHandle_t iohcRadio::txTaskHandle = nullptr;
     volatile bool iohcRadio::txComplete = false;
-    volatile bool iohcRadio::txBatchActive = false;
+    std::atomic<bool> iohcRadio::txBatchActive{false};
 
 
     TaskHandle_t handle_interrupt;
@@ -170,7 +170,8 @@ namespace IOHC {
         }
     }
 
-    iohcRadio::iohcRadio() {
+    iohcRadio::iohcRadio() : sendQueueMutex(xSemaphoreCreateMutex()) {
+        configASSERT(sendQueueMutex);
         Radio::initHardware();
         Radio::calibrate();
 
@@ -529,21 +530,30 @@ void iohcRadio::queueSend(std::vector<iohcPacket *> &iohcTx) {
     if (iohcTx.empty()) {
         return;
     }
+    xSemaphoreTake(sendQueueMutex, portMAX_DELAY);
     sendQueue.push(std::move(iohcTx));
-    ets_printf("TX: Queued send batch. Queue depth=%d\n", static_cast<int>(sendQueue.size()));
+    const auto queueDepth = sendQueue.size();
+    xSemaphoreGive(sendQueueMutex);
+    ets_printf("TX: Queued send batch. Queue depth=%d\n", static_cast<int>(queueDepth));
 }
 
 void iohcRadio::startQueuedSend() {
-    if (radioState == RadioState::TX || packets2send.size() > 0 || sendQueue.empty()) {
+    // Claim the next batch under the queue lock, before touching radio hardware.
+    // Test the active flag first: the timer may still be finishing the old batch.
+    xSemaphoreTake(sendQueueMutex, portMAX_DELAY);
+    if (txBatchActive || radioState == RadioState::TX || !packets2send.empty() || sendQueue.empty()) {
+        xSemaphoreGive(sendQueueMutex);
         return;
     }
 
-    setCrashMarker("radio: startQueuedSend");
     packets2send = std::move(sendQueue.front());
     sendQueue.pop();
     txCounter = 0;
     txComplete = false;
     txBatchActive = true;
+    xSemaphoreGive(sendQueueMutex);
+
+    setCrashMarker("radio: startQueuedSend");
     resumeTwoWScanAfterTx = twoWScanActive && twoWScanUntilMs > millis();
     resumeTwoWScanUntilMs = resumeTwoWScanAfterTx ? twoWScanUntilMs : 0;
     resumeTwoWScanWindowMs = resumeTwoWScanAfterTx

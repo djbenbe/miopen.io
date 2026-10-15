@@ -19,8 +19,10 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include <Delegate.h>
+#include <atomic>
 #include <cstdint>
 #include <queue>
 
@@ -79,7 +81,7 @@ namespace IOHC {
             static void tickerCounter(iohcRadio *radio);
             static TaskHandle_t txTaskHandle;
             static volatile bool txComplete;
-            static volatile bool txBatchActive;
+            static std::atomic<bool> txBatchActive;
             //static void setPreambleLength(uint16_t preambleLen);
 
         private:
@@ -129,6 +131,7 @@ namespace IOHC {
             IohcPacketDelegate txCB = nullptr;
             std::vector<iohcPacket*> packets2send{};
             std::queue<std::vector<iohcPacket*>> sendQueue{};
+            SemaphoreHandle_t sendQueueMutex;
         protected:
             static void i_preamble();
             static void i_payload();
