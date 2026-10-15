@@ -102,9 +102,6 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                       AwsEventType type, void *arg, uint8_t *data,
                       size_t len) {
   if (type == WS_EVT_CONNECT) {
-    // Ensure we broadcast the current position before sending init message
-    IOHC::iohcRemote1W::getInstance()->updatePositions();
-
     // Build a compact init message containing only device information
     JsonDocument doc;
     doc["type"] = "init";
@@ -305,9 +302,6 @@ ArJsonRequestHandlerFunction jsonPost(const ArPostRequestHandlerFunction<JsonArr
 }
 
 void handleApiDevices(AsyncWebServerRequest *request, JsonArray &root) {
-  // Update device positions before returning them to the web client
-  IOHC::iohcRemote1W::getInstance()->updatePositions();
-
   auto remotes = IOHC::iohcRemote1W::getInstance()->getRemotes();
   std::sort(remotes.begin(), remotes.end(),
             [](const IOHC::iohcRemote1W::remote &r1,
@@ -1369,8 +1363,13 @@ void setupWebServer() {
 }
 
 void loopWebServer() {
-  // For ESPAsyncWebServer, most work is done asynchronously.
-  ws.cleanupClients();
+  // Avoid continuously contending with the AsyncTCP task for the client lock.
+  static uint32_t lastCleanupMs = 0;
+  const uint32_t nowMs = millis();
+  if (nowMs - lastCleanupMs >= 1000) {
+    lastCleanupMs = nowMs;
+    ws.cleanupClients(4);
+  }
 }
 
 #endif // defined(WEBSERVER)
