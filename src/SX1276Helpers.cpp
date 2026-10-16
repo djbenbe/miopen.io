@@ -116,7 +116,9 @@ namespace Radio {
 void setPreambleLength(uint16_t preambleLen) {
     writeByte(REG_PREAMBLEMSB, (preambleLen >> 8) & 0xFF);
     writeByte(REG_PREAMBLELSB, preambleLen & 0xFF);
+#if CORE_DEBUG_LEVEL >= 5
     ets_printf("Radio: Preamble length set to %u symbols\n", preambleLen);
+#endif
 }
 
 /**

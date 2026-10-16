@@ -534,7 +534,9 @@ void iohcRadio::queueSend(std::vector<iohcPacket *> &iohcTx) {
     sendQueue.push(std::move(iohcTx));
     const auto queueDepth = sendQueue.size();
     xSemaphoreGive(sendQueueMutex);
+#if CORE_DEBUG_LEVEL >= 5
     ets_printf("TX: Queued send batch. Queue depth=%d\n", static_cast<int>(queueDepth));
+#endif
 }
 
 void iohcRadio::startQueuedSend() {
@@ -567,17 +569,21 @@ void iohcRadio::startQueuedSend() {
             break;
         }
     }
+#if CORE_DEBUG_LEVEL >= 5
     ets_printf("TX: Preparing %d packet(s), start_2w_listen=%d resume_2w_scan=%d\n",
                packets2send.size(),
                currentBatchHas2W ? 1 : 0,
                resumeTwoWScanAfterTx ? 1 : 0);
+#endif
     setRadioState(RadioState::TX);
 
     auto packet = packets2send[txCounter];
 
     // 🟢 Set long preamble for first packet
     Radio::setPreambleLength(LONG_PREAMBLE_MS);
+#if CORE_DEBUG_LEVEL >= 5
     ets_printf("TX: Using LONG preamble (%d ms)\n", LONG_PREAMBLE_MS);
+#endif
 
     // Send first packet immediately
     Radio::setStandby();
@@ -592,7 +598,9 @@ void iohcRadio::startQueuedSend() {
     //packet->decode(true); //false);
     //IOHC::lastSendCmd = packet->payload.packet.header.cmd;
 
+#if CORE_DEBUG_LEVEL >= 5
     ets_printf("TX: Sent first packet (%d repeats) at %llu us\n", packet->repeat, esp_timer_get_time());
+#endif
 
     // Start ticker for repeats (short preamble)
     Sender.attach_ms(packet->repeatTime, &iohcRadio::onTxTicker, (void*)this);
@@ -639,7 +647,9 @@ void iohcRadio::onTxTicker(void *arg) {
     // 🔁 Repeat logic
     if (packet->repeat > 0) {
         packet->repeat--;
+#if CORE_DEBUG_LEVEL >= 5
         ets_printf("TX: Repeating current packet (%d repeats left)\n", packet->repeat);
+#endif
     } else {
         // inform callback we finished sending this packet, this transfers ownership of the packet to the callback queue
         radio->sent(packet);
@@ -649,7 +659,9 @@ void iohcRadio::onTxTicker(void *arg) {
 
         // 🛑 Check if all packets are sent
         if (radio->txCounter == radio->packets2send.size()) {
+#if CORE_DEBUG_LEVEL >= 5
             ets_printf("TX: All packets sent. Stopping Ticker.\n");
+#endif
             const bool start2WListen = radio->currentBatchHas2W;
             radio->Sender.detach();
             radio->packets2send.clear();
@@ -678,10 +690,12 @@ void iohcRadio::onTxTicker(void *arg) {
         }
 
         packet = radio->packets2send[radio->txCounter];
+#if CORE_DEBUG_LEVEL >= 5
         ets_printf("TX: Moving to next packet %d/%d (repeat=%d)\n",
-                    radio->txCounter + 1,
-                    radio->packets2send.size(),
-                    packet->repeat);
+                   radio->txCounter + 1,
+                   radio->packets2send.size(),
+                   packet->repeat);
+#endif
     }
 
     radio->txComplete = false;
@@ -699,10 +713,12 @@ void iohcRadio::onTxTicker(void *arg) {
     //packet->decode(true); //false);
     //IOHC::lastSendCmd = packet->payload.packet.header.cmd;
 
+#if CORE_DEBUG_LEVEL >= 5
     ets_printf("TX: Sent packet %d/%d at %llu us\n",
                radio->txCounter + 1,
                radio->packets2send.size(),
                esp_timer_get_time());
+#endif
 }
 
 bool queueCallback(IohcPacketDelegate* callback, iohcPacket* packet) {
@@ -736,7 +752,7 @@ bool queueCallback(IohcPacketDelegate* callback, iohcPacket* packet) {
         bool ret = false;
         if (packet) {
             packetStamp.store(esp_timer_get_time());
-            packet->decode(true);
+            packet->decode(false);
             addLogMessage(String(packet->decodeToString(true).c_str()));
 #if defined(MQTT)
             publishRadioLogEvent(packet, "TX");
@@ -923,8 +939,10 @@ bool queueCallback(IohcPacketDelegate* callback, iohcPacket* packet) {
             expectedLength >= sizeof(_header) &&
             expectedLength <= MAX_FRAME_LEN &&
             iohc->buffer_length > expectedLength) {
+#if CORE_DEBUG_LEVEL >= 5
             ets_printf("RX: Trimming trailing FIFO bytes from %u to %u\n",
                        iohc->buffer_length, expectedLength);
+#endif
             iohc->buffer_length = expectedLength;
         }
 
@@ -1060,8 +1078,8 @@ bool queueCallback(IohcPacketDelegate* callback, iohcPacket* packet) {
             return;
         }
         radioState = newState;
-        // Optional debug:
-        //printf("State changed to: %d\n", static_cast<int>(newState));
+#if CORE_DEBUG_LEVEL >= 5
         ets_printf("State: %s\n", radioStateToString(newState));
+#endif
     }
 }

@@ -11,6 +11,7 @@
 #include <vector>
 #include <LittleFS.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
 #include <cstdlib>
 #include <cctype>
 #include <interact.h>
@@ -62,7 +63,19 @@ struct TwoWFrameLog {
 };
 
 static std::vector<TwoWFrameLog> g_twoWFrameLog;
+static std::vector<uint32_t> g_logSubscribers;
 static constexpr size_t TWO_W_FRAME_LOG_LIMIT = 30;
+
+static void setLogSubscription(uint32_t clientId, bool enabled) {
+  auto it = std::find(g_logSubscribers.begin(), g_logSubscribers.end(), clientId);
+  if (enabled) {
+    if (it == g_logSubscribers.end()) {
+      g_logSubscribers.push_back(clientId);
+    }
+  } else if (it != g_logSubscribers.end()) {
+    g_logSubscribers.erase(it);
+  }
+}
 
 static void fillTwoWStatus(JsonObject &obj) {
   obj["lastTxCommand"] = g_twoWStatus.lastTxCommand;
@@ -101,6 +114,21 @@ static void broadcastTwoWStatus() {
 static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                       AwsEventType type, void *arg, uint8_t *data,
                       size_t len) {
+  if (type == WS_EVT_DISCONNECT) {
+    setLogSubscription(client->id(), false);
+    return;
+  }
+  if (type == WS_EVT_DATA) {
+    AwsFrameInfo *info = static_cast<AwsFrameInfo *>(arg);
+    if (info && info->final && info->index == 0 && info->len == len &&
+        info->opcode == WS_TEXT) {
+      JsonDocument doc;
+      if (!deserializeJson(doc, data, len) && doc["type"] == "logsubscribe") {
+        setLogSubscription(client->id(), doc["enabled"] == true);
+      }
+    }
+    return;
+  }
   if (type == WS_EVT_CONNECT) {
     // Build a compact init message containing only device information
     JsonDocument doc;
@@ -130,12 +158,24 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 }
 
 void broadcastLog(const String &msg) {
+  if (g_logSubscribers.empty()) {
+    return;
+  }
   JsonDocument doc;
   doc["type"] = "log";
   doc["message"] = msg;
   String payload;
   serializeJson(doc, payload);
-  ws.textAll(payload);
+  ws.cleanupClients();
+  for (auto it = g_logSubscribers.begin(); it != g_logSubscribers.end();) {
+    AsyncWebSocketClient *client = ws.client(*it);
+    if (!client || !client->canSend()) {
+      it = g_logSubscribers.erase(it);
+      continue;
+    }
+    client->text(payload);
+    ++it;
+  }
 }
 
 void broadcastDevicePosition(const String &id, int position) {
@@ -1164,110 +1204,131 @@ void handleApiMqttSet(AsyncWebServerRequest *request, JsonObject &doc, JsonObjec
 }
 #endif
 
-void handleFirmwareUpdate(AsyncWebServerRequest *request) {
-  if (Update.hasError()) {
-    request->send(500, "application/json",
-                  "{\"message\":\"Firmware update failed\"}");
-  } else {
-    request->send(200, "application/json",
-                  "{\"message\":\"Firmware update successful, rebooting\"}");
-    static std::atomic<bool> rebootScheduled{false};
-    if (!rebootScheduled.exchange(true)) {
-      xTaskCreate(
-        [](void *) {
-          vTaskDelay(pdMS_TO_TICKS(1200));
-        ws.closeAll(1001, "restarting");
-        ws.cleanupClients();
-        vTaskDelay(pdMS_TO_TICKS(1800));
-        ESP.restart();
-        },
-        "reboot",
-        3072,
-        nullptr,
-        5,
-        nullptr
-      );
+struct WebUpdateState {
+  bool started;
+  bool completed;
+  bool failed;
+  size_t bytesWritten;
+  char error[128];
+};
+
+static void setWebUpdateError(WebUpdateState *state, const char *message) {
+  if (!state) return;
+  state->failed = true;
+  const char *detail = Update.hasError() ? Update.errorString() : nullptr;
+  snprintf(state->error, sizeof(state->error), "%s%s%s", message,
+           detail && *detail ? ": " : "", detail && *detail ? detail : "");
+  Update.printError(Serial);
+}
+
+static void handleWebUpdateResult(AsyncWebServerRequest *request,
+                                  const char *kind,
+                                  const char *restartTask) {
+  auto *state = static_cast<WebUpdateState *>(request->_tempObject);
+  request->_tempObject = nullptr;
+  const bool completed = state && state->started && state->completed &&
+                         !state->failed && state->bytesWritten > 0;
+
+  JsonDocument responseDoc;
+  if (!completed) {
+    String message = String(kind) + " update failed";
+    if (state && state->error[0]) message += ": " + String(state->error);
+    responseDoc["message"] = message;
+    String payload;
+    serializeJson(responseDoc, payload);
+    free(state);
+    request->send(500, "application/json", payload);
+    return;
+  }
+
+  responseDoc["message"] = String(kind) + " update successful, rebooting";
+  responseDoc["bytes"] = state->bytesWritten;
+  String payload;
+  serializeJson(responseDoc, payload);
+  free(state);
+  request->send(200, "application/json", payload);
+  scheduleRestart(restartTask);
+}
+
+static void handleWebUpdateUpload(AsyncWebServerRequest *request,
+                                  const String &filename, size_t index,
+                                  uint8_t *data, size_t len, bool final,
+                                  bool filesystem) {
+  auto *state = static_cast<WebUpdateState *>(request->_tempObject);
+  if (!index) {
+    if (Update.isRunning()) Update.abort();
+    Update.clearError();
+    state = static_cast<WebUpdateState *>(calloc(1, sizeof(WebUpdateState)));
+    request->_tempObject = state;
+    if (!state) return;
+    Serial.printf("%s upload start: %s\n",
+                  filesystem ? "Filesystem" : "Firmware", filename.c_str());
+    if (filesystem) {
+      preserveConfigBeforeFilesystemUpdate();
+      LittleFS.end();
+    } else {
+      const esp_partition_t *running = esp_ota_get_running_partition();
+      const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
+      if (!next || (running && next->address == running->address)) {
+        snprintf(state->error, sizeof(state->error),
+                 "Web firmware upload is unavailable without a second app partition; use USB/serial");
+        state->failed = true;
+        return;
+      }
+    }
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN, filesystem ? U_SPIFFS : U_FLASH)) {
+      setWebUpdateError(state, "Update begin failed");
+      return;
+    }
+    state->started = true;
+  }
+
+  if (!state || state->failed || !state->started) return;
+  if (len) {
+    const size_t written = Update.write(data, len);
+    state->bytesWritten += written;
+    if (written != len) {
+      setWebUpdateError(state, "Update write failed");
+      if (Update.isRunning()) Update.abort();
+      return;
     }
   }
+
+  if (final) {
+    if (!state->bytesWritten || !Update.end(true)) {
+      setWebUpdateError(state, "Update verification failed");
+      if (Update.isRunning()) Update.abort();
+      return;
+    }
+    state->completed = true;
+    Serial.printf("%s upload complete: %u bytes\n",
+                  filesystem ? "Filesystem" : "Firmware",
+                  static_cast<unsigned>(state->bytesWritten));
+    if (filesystem) restoreConfigAfterFilesystemUpdate();
+  }
+}
+
+void handleFirmwareUpdate(AsyncWebServerRequest *request) {
+  handleWebUpdateResult(request, "Firmware", "firmware-reboot");
 }
 
 void handleFirmwareUpload(AsyncWebServerRequest *request, String filename,
                           size_t index, uint8_t *data, size_t len,
                           bool final) {
-  if (!index) {
-    Serial.printf("Firmware upload start: %s\n", filename.c_str());
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-      Update.printError(Serial);
-    }
-  }
-  if (!Update.hasError()) {
-    if (Update.write(data, len) != len) {
-      Update.printError(Serial);
-    }
-  }
-  if (final) {
-    if (!Update.end(true)) {
-      Update.printError(Serial);
-    }
-  }
+  handleWebUpdateUpload(request, filename, index, data, len, final, false);
 }
 
 void handleFilesystemUpdate(AsyncWebServerRequest *request) {
-  if (Update.hasError()) {
-    String message = "Filesystem update failed";
-    if (Update.getError() != 0) {
-      message += ": error=" + String(Update.getError());
-    }
-    request->send(500, "application/json", String("{\"message\":\"") + message + "\"}");
-    LittleFS.begin();
-  } else {
-    request->send(200, "application/json",
-                  "{\"message\":\"Filesystem update successful, rebooting\"}");
-    static std::atomic<bool> rebootScheduled{false};
-    if (!rebootScheduled.exchange(true)) {
-      xTaskCreate(
-        [](void *) {
-          vTaskDelay(pdMS_TO_TICKS(1200));
-        ws.closeAll(1001, "restarting");
-        ws.cleanupClients();
-        vTaskDelay(pdMS_TO_TICKS(1800));
-        ESP.restart();
-        },
-        "reboot",
-        3072,
-        nullptr,
-        5,
-        nullptr
-      );
-    }
-  }
+  auto *state = static_cast<WebUpdateState *>(request->_tempObject);
+  const bool completed = state && state->completed && !state->failed;
+  handleWebUpdateResult(request, "Filesystem", "filesystem-reboot");
+  if (!completed) LittleFS.begin();
 }
 
 void handleFilesystemUpload(AsyncWebServerRequest *request, String filename,
                             size_t index, uint8_t *data, size_t len,
                             bool final) {
-  if (!index) {
-    Serial.printf("Filesystem upload start: %s\n", filename.c_str());
-    preserveConfigBeforeFilesystemUpdate();
-    LittleFS.end();
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_SPIFFS)) {
-      Update.printError(Serial);
-      return;
-    }
-  }
-  if (!Update.hasError()) {
-    if (len && Update.write(data, len) != len) {
-      Update.printError(Serial);
-    }
-  }
-  if (final) {
-    if (!Update.end(true)) {
-      Update.printError(Serial);
-    } else {
-      Serial.printf("Filesystem upload complete: %u bytes\n", index + len);
-      restoreConfigAfterFilesystemUpdate();
-    }
-  }
+  handleWebUpdateUpload(request, filename, index, data, len, final, true);
 }
 
 void setupWebServer() {

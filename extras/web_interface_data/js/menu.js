@@ -57,6 +57,10 @@
             setPageDisplay(page, route.page);
         });
 
+        if (window.MiOpenApp && typeof window.MiOpenApp.setActivePage === "function") {
+            window.MiOpenApp.setActivePage(route.page);
+        }
+
         if (route.page === "settings" && route.settingsTab && typeof window.activateSettingsTab === "function") {
             window.activateSettingsTab(route.settingsTab);
         }

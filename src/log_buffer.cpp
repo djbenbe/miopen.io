@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <log_buffer.h>
 #include <user_config.h>
+#include <time.h>
 
 #if defined(WEBSERVER)
 #include <web_server_handler.h>
@@ -13,6 +14,7 @@
 namespace {
     constexpr size_t MAX_LOG_ENTRIES = 60;
     constexpr size_t MAX_LOG_ENTRY_LEN = 384;
+    constexpr time_t MIN_VALID_UNIX_TIME = 1704067200; // 2024-01-01
 
     char logRing[MAX_LOG_ENTRIES][MAX_LOG_ENTRY_LEN] = {};
     size_t logStart = 0;
@@ -20,6 +22,26 @@ namespace {
     RTC_NOINIT_ATTR char crashMarker[96];
     RTC_NOINIT_ATTR uint32_t crashMarkerMagic;
     constexpr uint32_t CRASH_MARKER_MAGIC = 0x4d494f50; // MIOP
+
+    String logTimestamp(unsigned long nowMs) {
+        const time_t now = time(nullptr);
+        if (now >= MIN_VALID_UNIX_TIME) {
+            struct tm localTime;
+            localtime_r(&now, &localTime);
+            char timestamp[12];
+            strftime(timestamp, sizeof(timestamp), "[%H:%M:%S]", &localTime);
+            return String(timestamp);
+        }
+
+        const unsigned long totalSeconds = nowMs / 1000UL;
+        const unsigned long hours = totalSeconds / 3600UL;
+        const unsigned long minutes = (totalSeconds / 60UL) % 60UL;
+        const unsigned long seconds = totalSeconds % 60UL;
+        char timestamp[32];
+        snprintf(timestamp, sizeof(timestamp), "[uptime %lu:%02lu:%02lu]",
+                 hours, minutes, seconds);
+        return String(timestamp);
+    }
 
     bool shouldBroadcastLog(const String &msg) {
         if (msg.length() == 0) {
@@ -80,7 +102,8 @@ void addLogMessage(const String &msg) {
         logCount++;
     }
 
-    snprintf(logRing[slot], MAX_LOG_ENTRY_LEN, "%s", text);
+    const String timestamp = logTimestamp(now);
+    snprintf(logRing[slot], MAX_LOG_ENTRY_LEN, "%s %s", timestamp.c_str(), text);
     const String storedMessage(logRing[slot]);
     Serial.printf("[%10lu ms] %s\n", now, storedMessage.c_str());
 #if defined(WEBSERVER)

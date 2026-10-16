@@ -11,6 +11,9 @@
 // Start SNTP/NTP time sync after WiFi is connected. Non-blocking.
 void startSyslogTimeSync();
 
+// Retry time sync while connected and report when the clock becomes valid.
+void maintainSyslogTimeSync();
+
 // Return true when the system clock has been set by NTP/SNTP.
 bool isSyslogTimeSynced();
 

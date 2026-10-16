@@ -625,7 +625,9 @@ void onMqttMessage(char *topic, char *payload, AsyncMqttClientMessageProperties 
     memcpy(buf, payload, len);
     buf[len] = '\0';
 
+#if CORE_DEBUG_LEVEL >= 5
     Serial.printf("Received MQTT %s %s %d\n", topic, buf, len);
+#endif
 
     std::string topicStr(topic);
     std::string payloadStr(buf);

@@ -30,9 +30,9 @@ jobs:
           restore-keys: ${{ runner.os }}-pio-
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.12'
 
       - name: install esptools
         run: pip install -U esptool
@@ -47,24 +47,29 @@ jobs:
       - name: Build PlatformIO project
         env:
           RELEASE_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || steps.generate_release_tag.outputs.release_tag }}
-        run: pio run -e LilyGoLoraESP32 -e HeltecLoraV2ESP32 -e LilyGoT3S3
+        run: pio run -e LilyGoTBeamV12ESP32 -e LilyGoLoraESP32 -e HeltecLoraV2ESP32 -e LilyGoT3S3
 
       - name: Build filesystem
         env:
           RELEASE_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || steps.generate_release_tag.outputs.release_tag }}
-        run: pio run -e LilyGoLoraESP32 -e HeltecLoraV2ESP32 -e LilyGoT3S3 -t buildfs
+        run: pio run -e LilyGoTBeamV12ESP32 -e LilyGoLoraESP32 -e HeltecLoraV2ESP32 -e LilyGoT3S3 -t buildfs
+
+      - name: Merge bin files together for LilyGoTBeamV12ESP32
+        run: esptool --chip esp32 merge-bin -o LilyGoTBeamV12ESP32.bin --flash-size 4MB 0x1000 .pio/build/LilyGoTBeamV12ESP32/bootloader.bin 0x8000 .pio/build/LilyGoTBeamV12ESP32/partitions.bin 0x10000 .pio/build/LilyGoTBeamV12ESP32/firmware.bin 0x3B0000 .pio/build/LilyGoTBeamV12ESP32/littlefs.bin
 
       - name: Merge bin files together for LilyGoLoraESP32
-        run: esptool --chip esp32 merge-bin -o LilyGoLoraESP32.bin --flash-size 4MB 0x1000 .pio/build/LilyGoLoraESP32/bootloader.bin 0x8000 .pio/build/LilyGoLoraESP32/partitions.bin 0x10000 .pio/build/LilyGoLoraESP32/firmware.bin 0x210000 .pio/build/LilyGoLoraESP32/littlefs.bin
+        run: esptool --chip esp32 merge-bin -o LilyGoLoraESP32.bin --flash-size 4MB 0x1000 .pio/build/LilyGoLoraESP32/bootloader.bin 0x8000 .pio/build/LilyGoLoraESP32/partitions.bin 0x10000 .pio/build/LilyGoLoraESP32/firmware.bin 0x3B0000 .pio/build/LilyGoLoraESP32/littlefs.bin
 
       - name: Merge bin files together for HeltecLoraV2ESP32
         run: esptool --chip esp32 merge-bin -o HeltecLoraV2ESP32.bin --flash-size 8MB 0x1000 .pio/build/HeltecLoraV2ESP32/bootloader.bin 0x8000 .pio/build/HeltecLoraV2ESP32/partitions.bin 0x10000 .pio/build/HeltecLoraV2ESP32/firmware.bin 0x670000 .pio/build/HeltecLoraV2ESP32/littlefs.bin
 
       - name: Merge bin files together for LilyGoT3S3
-        run: esptool --chip esp32s3 merge-bin -o LilyGoT3S3.bin --flash-size 4MB 0x0 .pio/build/LilyGoT3S3/bootloader.bin 0x8000 .pio/build/LilyGoT3S3/partitions.bin 0x10000 .pio/build/LilyGoT3S3/firmware.bin 0x210000 .pio/build/LilyGoT3S3/littlefs.bin
+        run: esptool --chip esp32s3 merge-bin -o LilyGoT3S3.bin --flash-size 4MB 0x0 .pio/build/LilyGoT3S3/bootloader.bin 0x8000 .pio/build/LilyGoT3S3/partitions.bin 0x10000 .pio/build/LilyGoT3S3/firmware.bin 0x3B0000 .pio/build/LilyGoT3S3/littlefs.bin
 
       - name: Prepare firmware and littlefs files for release
         run: |
+          mv .pio/build/LilyGoTBeamV12ESP32/firmware.bin LilyGoTBeamV12ESP32_firmware.bin
+          mv .pio/build/LilyGoTBeamV12ESP32/littlefs.bin LilyGoTBeamV12ESP32_filesystem.bin
           mv .pio/build/LilyGoLoraESP32/firmware.bin LilyGoLoraESP32_firmware.bin
           mv .pio/build/LilyGoLoraESP32/littlefs.bin LilyGoLoraESP32_filesystem.bin
           mv .pio/build/HeltecLoraV2ESP32/firmware.bin HeltecLoraV2ESP32_firmware.bin
@@ -79,7 +84,20 @@ jobs:
 
           Commit: ${{ github.sha }}
 
+          BELANGRIJK VOOR DEZE UPDATE
+          - Maak VOORAF een volledige backup via Instellingen.
+          - Voer deze eerste update via een pc en USB uit met het gecombineerde bestand voor jouw board.
+          - Het gecombineerde bestand bevat zowel de firmware als het filesystem. Installeer dus NIET alleen het losse firmwarebestand.
+          - Gebruik voor deze eerste migratie NIET de firmware- of filesystem-upload in de webinterface. De partitie-indeling en locatie van LittleFS veranderen.
+          - Herstel na de USB-update je backup via Instellingen.
+          - Na deze eenmalige USB-migratie kunnen volgende firmware- en filesystem-updates weer via de webinterface worden uitgevoerd.
+          - Heltec LoRa V2 heeft al twee firmwarepartities en heeft deze migratie niet nodig.
+
+          Bugfix: de webinterface meldt een firmware-upload alleen nog als geslaagd wanneer de ESP de volledige firmware heeft geschreven en gevalideerd.
+
           Included files:
+          - LilyGoTBeamV12ESP32 combined firmware image
+          - LilyGoTBeamV12ESP32 firmware and filesystem images
           - LilyGoLoraESP32 combined firmware image
           - LilyGoLoraESP32 firmware and filesystem images
           - HeltecLoraV2ESP32 combined firmware image
@@ -93,9 +111,12 @@ jobs:
         with:
           name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || steps.generate_release_tag.outputs.release_tag }}
           body_path: changelog.md
-          prerelease: ${{ !startsWith(github.ref_name, 'v') }}
+          prerelease: ${{ contains(github.ref_name, 'Beta') || contains(github.ref_name, 'beta') || !startsWith(github.ref_name, 'v') }}
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || steps.generate_release_tag.outputs.release_tag }}
           files: |
+            LilyGoTBeamV12ESP32.bin
+            LilyGoTBeamV12ESP32_firmware.bin
+            LilyGoTBeamV12ESP32_filesystem.bin
             LilyGoLoraESP32.bin
             LilyGoLoraESP32_firmware.bin
             LilyGoLoraESP32_filesystem.bin
@@ -111,6 +132,9 @@ jobs:
         with:
           name: build-artifacts
           path: |
+            LilyGoTBeamV12ESP32.bin
+            LilyGoTBeamV12ESP32_firmware.bin
+            LilyGoTBeamV12ESP32_filesystem.bin
             LilyGoLoraESP32.bin
             LilyGoLoraESP32_firmware.bin
             LilyGoLoraESP32_filesystem.bin

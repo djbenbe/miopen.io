@@ -267,6 +267,9 @@ static void maintainWiFiConnection() {
             wifiStatus.rssi = WiFi.RSSI();
             wifiStatus.signalStrengthPercent = rssiToQuality(wifiStatus.rssi);
         }
+#if defined(SYSLOG)
+        maintainSyslogTimeSync();
+#endif
         return;
     }
 

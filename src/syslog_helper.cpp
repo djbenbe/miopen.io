@@ -8,6 +8,7 @@
 #include <WiFiUdp.h>
 #include <esp_log.h>
 #include <esp_random.h>
+#include <log_buffer.h>
 #include <nvs_helpers.h>
 #include <time.h>
 
@@ -28,10 +29,13 @@ namespace {
     IPAddress    syslogIP;
     bool         syslogReady  = false;
     bool         configLoaded = false;
-    bool         timeSyncStarted = false;
+    bool         timeSyncAttempted = false;
+    bool         timeSyncReported = false;
+    uint32_t     lastTimeSyncAttemptMs = 0;
     uint32_t     syslogBackoffUntilMs = 0;
     uint32_t     lastSyslogSendMs = 0;
     static constexpr time_t MIN_VALID_UNIX_TIME = 1704067200; // 2024-01-01, avoids fake boot dates.
+    static constexpr uint32_t TIME_SYNC_RETRY_MS = 60000;
     static constexpr uint32_t SYSLOG_MIN_SEND_INTERVAL_MS = 250;
     static constexpr uint32_t SYSLOG_ERROR_BACKOFF_MS = 60000;
     static const char *TAG    = "SYSLOG";
@@ -125,21 +129,48 @@ namespace {
     }
 }
 
-// Start SNTP once WiFi is connected. This is intentionally non-blocking: early
-// boot syslog messages still go out and are timestamped by the receiver.
+// Start SNTP once WiFi is connected. This is intentionally non-blocking.
 void startSyslogTimeSync() {
     ensureConfigLoaded();
-    if (WiFi.status() != WL_CONNECTED || timeSyncStarted) {
+    if (WiFi.status() != WL_CONNECTED || hasValidSystemTime()) {
+        return;
+    }
+
+    const uint32_t nowMs = millis();
+    if (timeSyncAttempted && nowMs - lastTimeSyncAttemptMs < TIME_SYNC_RETRY_MS) {
         return;
     }
 
     const String timezone = configuredTimezone();
-    setenv("TZ", timezone.c_str(), 1);
-    tzset();
-
     const String server = configuredSntpServer();
-    configTime(0, 0, server.c_str());
-    timeSyncStarted = true;
+    configTzTime(timezone.c_str(), server.c_str(), "time.google.com", "time.cloudflare.com");
+    lastTimeSyncAttemptMs = nowMs;
+    const bool retry = timeSyncAttempted;
+    timeSyncAttempted = true;
+
+    addLogMessage(String("Time synchronization ") + (retry ? "retry" : "started") +
+                  " using " + server);
+}
+
+void maintainSyslogTimeSync() {
+    if (WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+
+    if (!hasValidSystemTime()) {
+        startSyslogTimeSync();
+        return;
+    }
+
+    if (!timeSyncReported) {
+        timeSyncReported = true;
+        const time_t now = time(nullptr);
+        struct tm localTime;
+        localtime_r(&now, &localTime);
+        char timestamp[24];
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &localTime);
+        addLogMessage("Time synchronized: " + String(timestamp));
+    }
 }
 
 bool isSyslogTimeSynced() {
@@ -249,6 +280,7 @@ void resetSyslog() {
 
 // No-op definitions so you can build without SYSLOG
 void startSyslogTimeSync() {}
+void maintainSyslogTimeSync() {}
 bool isSyslogTimeSynced() { return false; }
 void initSyslog() {}
 void resetSyslog() {}

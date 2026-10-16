@@ -567,14 +567,13 @@
     function uploadFileWithProgress(file, url, onProgress) {
         return new Promise(function (resolve, reject) {
             const xhr = new XMLHttpRequest();
-            let uploadComplete = false;
             const formData = new FormData();
             formData.append("file", file);
+            xhr.timeout = 300000;
 
             xhr.upload.addEventListener("progress", function (event) {
                 if (event.lengthComputable && onProgress) {
                     const percent = Math.round((event.loaded / event.total) * 100);
-                    uploadComplete = percent >= 100;
                     onProgress(percent);
                 }
             });
@@ -593,14 +592,13 @@
                 }
             });
             xhr.addEventListener("error", function () {
-                if (uploadComplete && (url === "/api/firmware" || url === "/api/filesystem")) {
-                    resolve({ message: "Upload sent to device, rebooting..." });
-                    return;
-                }
-                reject(new Error("Upload connection failed"));
+                reject(new Error("Upload connection failed before device confirmation"));
             });
             xhr.addEventListener("abort", function () {
                 reject(new Error("Upload cancelled"));
+            });
+            xhr.addEventListener("timeout", function () {
+                reject(new Error("Upload timed out before device confirmation"));
             });
 
             xhr.open("POST", url);

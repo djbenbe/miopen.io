@@ -225,14 +225,29 @@
         const page = hash.split("/").filter(Boolean)[0] || "devices";
         return page === "help" ? "logs" : page;
     }
+
+    function sendLogSubscription(app, enabled) {
+        const ws = app.state.ws;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        ws.send(JSON.stringify({ type: "logsubscribe", enabled: !!enabled }));
+    }
+
     function initWebSocket(app) {
         const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
         const ws = new WebSocket(wsScheme + "://" + window.location.host + "/ws");
         app.state.ws = ws;
 
         ws.onmessage = function (event) {
-            const data = JSON.parse(event.data);
+            let data;
+            try {
+                data = JSON.parse(event.data);
+            } catch (_error) {
+                return;
+            }
             if (data.type === "log") {
+                app.elements = createElements();
                 app.logStatus(data.message);
             } else if (data.type === "position") {
                 app.updateDeviceFill(data.id, data.position);
@@ -254,6 +269,7 @@
 
         ws.onopen = function () {
             app.state.wsConnected = true;
+            sendLogSubscription(app, app.state.activePage === "logs");
         };
 
         ws.onclose = function () {
@@ -398,6 +414,15 @@
             loadLogBuffer: function () {
                 return loadLogBuffer(app);
             },
+            setActivePage: function (page) {
+                const previousPage = app.state.activePage;
+                app.state.activePage = page;
+                app.elements = createElements();
+                sendLogSubscription(app, page === "logs");
+                if (page === "logs" && previousPage !== "logs" && app.elements.statusMessages) {
+                    app.loadLogBuffer();
+                }
+            },
             initDynamicPage: function (page) {
                 initDynamicPage(app, page);
             },
@@ -405,6 +430,7 @@
                 devicesCache: [],
                 devicesLoadingPromise: null,
                 ws: null,
+                activePage: currentHashPage(),
                 settingsPageReady: false,
                 logsPageReady: false,
                 twowPageReady: false
