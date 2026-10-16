@@ -155,6 +155,12 @@ ul#device-list {
   font-size: 1em;
   padding: 2px;
 }
+.grid > .left, .grid > .right {
+  min-width: 0;
+}
+#status-section .card {
+  overflow-x: auto;
+}
 ul#device-list li {
   background: var(--color-input); /* #fefefe5e */
   margin: 0;
@@ -183,6 +189,78 @@ ul#device-list .device-state {
   font-size: 0.75rem;
   opacity: 0.78;
   padding-top: 0;
+}
+ul#device-list .device-name {
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+ul#device-list .device-protocol {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  margin: 0;
+  padding: 2px 6px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+}
+ul#device-list [data-protocol="2W"] {
+  background: var(--color-accent2);
+  min-height: 210px;
+}
+ul#device-list .device-details {
+  margin-top: auto;
+}
+#add-popup {
+  position: absolute;
+  right: 10px;
+  padding: 0;
+}
+#device-add-panel[hidden], #device-add-panel [hidden] {
+  display: none;
+}
+#popup.device-pairing .card-popup {
+  grid-template-columns: minmax(0, 1fr);
+}
+#popup.device-pairing #right {
+  display: none;
+}
+#popup-close {
+  position: absolute;
+  right: 10px;
+  padding: 0;
+}
+#device-protocol-choice:not([hidden]) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+#device-protocol-choice button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 60px;
+  font-size: 18px;
+  border-radius: 6px;
+}
+#device-protocol-choice img {
+  width: 28px;
+  height: 28px;
+  filter: brightness(0) invert(1);
+}
+#device-pair-progress p {
+  overflow-wrap: anywhere;
+}
+#device-pair-error {
+  color: var(--color-text);
+  border-left: 3px solid #c94040;
+  padding-left: 10px;
 }
 table {
   border-collapse: collapse;
@@ -281,6 +359,34 @@ input, select {
     box-sizing: border-box;
     background: var(--color-input);
     color:var(--color-text);
+}
+
+.password-field {
+    position: relative;
+    display: flex;
+    align-items: center;
+    margin: 5px 0 10px 0;
+}
+.password-field input {
+    width: 100%;
+    margin: 0;
+    padding-right: 44px;
+}
+.password-toggle {
+    position: absolute;
+    right: 6px;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    background: transparent url("../img/eye.svg") center / 20px 20px no-repeat;
+}
+.password-toggle.visible {
+    background-image: url("../img/eye_off.svg");
+}
+.password-toggle:hover {
+    background-color: var(--color-accent2);
 }
 .setting-toggle {
   display: flex;

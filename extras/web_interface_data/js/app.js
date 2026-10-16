@@ -1,81 +1,14 @@
 (function () {
-    function ensureApiModule() {
-        if (window.MiOpenApi) {
-            return;
-        }
-
-        function ensureJson(response) {
-            return response.json().catch(function () {
-                return {};
-            });
-        }
-
-        async function requestJson(url, options) {
-            const requestOptions = options || {};
-            const method = (requestOptions.method || "GET").toUpperCase();
-            const requestUrl = method === "GET"
-                ? url + (url.indexOf("?") === -1 ? "?" : "&") + "_=" + Date.now()
-                : url;
-
-            if (method === "GET") {
-                requestOptions.cache = "no-store";
-            }
-
-            let response;
-            try {
-                response = await fetch(requestUrl, requestOptions);
-            } catch (error) {
-                throw new Error("ESP niet bereikbaar. Controleer of het toestel online is of net herstart.");
-            }
-            const data = await ensureJson(response);
-            if (!response.ok) {
-                throw new Error(data.message || ("HTTP error " + response.status));
-            }
-            return data;
-        }
-
-        window.MiOpenApi = {
-            downloadFile: async function (url, filename) {
-                const response = await fetch(url);
-                if (!response.ok) {
-                    throw new Error("Network response was not ok");
-                }
-
-                const blob = await response.blob();
-                const link = document.createElement("a");
-                link.href = window.URL.createObjectURL(blob);
-                link.download = filename;
-                link.click();
-                window.URL.revokeObjectURL(link.href);
-            },
-            postJson: function (url, payload) {
-                return requestJson(url, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload)
-                });
-            },
-            requestJson: requestJson,
-            uploadFile: function (url, file) {
-                const formData = new FormData();
-                formData.append("file", file);
-                return requestJson(url, {
-                    method: "POST",
-                    body: formData
-                });
-            }
-        };
-    }
-
     function createElements() {
         return {
             addPopupButton: document.getElementById("add-popup"),
-            commandDeviceSelect: document.querySelector("#help-page #device-select"),
+            commandDeviceSelect: document.querySelector("#logs-page #device-select"),
             commandInput: document.getElementById("command-input"),
             deviceList: document.getElementById("device-list"),
             backupFileInput: document.getElementById("backup-file"),
             backupUploadButton: document.getElementById("upload-backup"),
             downloadBackupButton: document.getElementById("download-backup"),
+            downloadTwoWBackupButton: document.getElementById("download-2w-backup"),
             devicesFileInput: document.getElementById("devices-file"),
             devicesUploadButton: document.getElementById("upload-devices"),
             downloadDevicesButton: document.getElementById("download-devices"),
@@ -89,10 +22,12 @@
             lastAddrInput: document.getElementById("last-address"),
             mqttDiscoveryInput: document.getElementById("mqtt-discovery"),
             mqttPasswordInput: document.getElementById("mqtt-password"),
+            mqttPasswordToggle: document.getElementById("mqtt-password-toggle"),
             mqttPortInput: document.getElementById("mqtt-port"),
             mqttServerInput: document.getElementById("mqtt-server"),
             mqttUpdateButton: document.getElementById("mqtt-update"),
             mqttUserInput: document.getElementById("mqtt-user"),
+            mqttAllowAnonymousInput: document.getElementById("mqtt-allow-anonymous"),
             wifiSsidInput: document.getElementById("wifi-ssid"),
             wifiPasswordInput: document.getElementById("wifi-password"),
             wifiScanButton: document.getElementById("wifi-scan-btn"),
@@ -107,6 +42,7 @@
             networkDns1Input: document.getElementById("net-dns1"),
             networkDns2Input: document.getElementById("net-dns2"),
             networkSntpInput: document.getElementById("net-sntp"),
+            networkTzInput: document.getElementById("net-tz"),
             networkStatus: document.getElementById("network-status"),
             networkSaveButton: document.getElementById("network-save"),
             fallbackEnabledInput: document.getElementById("fallback-enabled"),
@@ -130,7 +66,39 @@
             sendCommandButton: document.getElementById("send-command-button"),
             statusMessages: document.getElementById("status-messages"),
             suggestions: document.getElementById("suggestions"),
-            themeToggle: document.getElementById("toggle-theme")
+            themeToggle: document.getElementById("toggle-theme"),
+            twowStatus: document.getElementById("twow-status"),
+            twowLastTx: document.getElementById("twow-last-tx"),
+            twowLastResult: document.getElementById("twow-last-result"),
+            twowLastRx: document.getElementById("twow-last-rx"),
+            twowLastData: document.getElementById("twow-last-data"),
+            twowLog: document.getElementById("twow-log"),
+            twowPowerOnButton: document.getElementById("twow-poweron"),
+            twowMidnightButton: document.getElementById("twow-midnight"),
+            twowAssociateButton: document.getElementById("twow-associate"),
+            twowAckButton: document.getElementById("twow-ack"),
+            twowTempInput: document.getElementById("twow-temp"),
+            twowSetTempButton: document.getElementById("twow-settemp"),
+            twowModeInput: document.getElementById("twow-mode"),
+            twowSetModeButton: document.getElementById("twow-setmode"),
+            twowPresenceInput: document.getElementById("twow-presence"),
+            twowSetPresenceButton: document.getElementById("twow-setpresence"),
+            twowWindowInput: document.getElementById("twow-window"),
+            twowSetWindowButton: document.getElementById("twow-setwindow"),
+            twowPairButton: document.getElementById("twow-pair"),
+            twowPairAltButton: document.getElementById("twow-pair-alt"),
+            twowPairKeyButton: document.getElementById("twow-pair-key"),
+            twowListenButton: document.getElementById("twow-listen"),
+            twowListenSlowButton: document.getElementById("twow-listen-slow"),
+            twowSurveyButton: document.getElementById("twow-survey"),
+            twowDiscover28Button: document.getElementById("twow-discover28"),
+            twowDiscover2AButton: document.getElementById("twow-discover2a"),
+            twowFake0Button: document.getElementById("twow-fake0"),
+            twowCustomInput: document.getElementById("twow-custom"),
+            twowSendCustomButton: document.getElementById("twow-sendcustom"),
+            twowCustom60Input: document.getElementById("twow-custom60"),
+            twowSendCustom60Button: document.getElementById("twow-sendcustom60"),
+            twowSurveyTableBody: document.querySelector("#twow-survey-table tbody")
         };
     }
 
@@ -183,6 +151,9 @@
 
     function initSuggestions(app) {
         const suggestions = ["add", "remove", "close", "open", "ls", "cat"];
+        if (!app.elements.suggestions) {
+            return;
+        }
         app.elements.suggestions.textContent = "";
 
         suggestions.forEach(function (item) {
@@ -251,6 +222,18 @@
         }
     }
 
+    function currentHashPage() {
+        const hash = window.location.hash.replace(/^#\/?/, "");
+        const page = hash.split("/").filter(Boolean)[0] || "devices";
+        return page === "help" ? "logs" : page;
+    }
+    function sendLogSubscription(app, enabled) {
+        if (!app.state.ws || app.state.ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        app.state.ws.send(JSON.stringify({ type: "logsubscribe", enabled: !!enabled }));
+    }
+
     function initWebSocket(app) {
         const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
         const ws = new WebSocket(wsScheme + "://" + window.location.host + "/ws");
@@ -265,14 +248,22 @@
             } else if (data.type === "deviceaction") {
                 app.applyDeviceAction(data);
             } else if (data.type === "init") {
-                app.fetchAndDisplayDevices();
+                if (Array.isArray(data.devices)) {
+                    app.state.devicesCache = data.devices;
+                }
             } else if (data.type === "lastaddr") {
-                app.elements.lastAddrInput.value = data.address || "";
+                app.elements = createElements();
+                if (app.elements.lastAddrInput) {
+                    app.elements.lastAddrInput.value = data.address || "";
+                }
+            } else if (data.type === "twowstatus" && app.applyTwoWStatus) {
+                app.applyTwoWStatus(data.status || {});
             }
         };
 
         ws.onopen = function () {
             app.state.wsConnected = true;
+            sendLogSubscription(app, (app.state.activePage || currentHashPage()) === "logs");
         };
 
         ws.onclose = function () {
@@ -292,6 +283,9 @@
         }
         if (app.elements.mqttUpdateButton) {
             app.elements.mqttUpdateButton.addEventListener("click", app.updateMqttConfig);
+        }
+        if (app.elements.mqttPasswordToggle) {
+            app.elements.mqttPasswordToggle.addEventListener("click", app.toggleMqttPasswordVisibility);
         }
         if (app.elements.wifiScanButton) {
             app.elements.wifiScanButton.addEventListener("click", app.scanWifiNetworks);
@@ -338,6 +332,15 @@
                 });
             });
         }
+        if (app.elements.downloadTwoWBackupButton) {
+            app.elements.downloadTwoWBackupButton.addEventListener("click", function () {
+                window.MiOpenApi.downloadFile("/api/download/backup/2w", "miopen-2w-backup.json").catch(function (error) {
+                    const message = error.message || "2W backup download failed";
+                    if (typeof window.showToast === "function") window.showToast(message, true);
+                    app.logStatus(message, true);
+                });
+            });
+        }
         if (app.elements.downloadDevicesButton) {
             app.elements.downloadDevicesButton.addEventListener("click", function () {
                 window.MiOpenApi.downloadFile("/api/download/devices", "1W.json").catch(function (error) {
@@ -358,8 +361,55 @@
         }
     }
 
+
+    function initDynamicPage(app, page) {
+        app.elements = createElements();
+        if (page === "twow" && !app.state.twowPageReady) {
+            app.elements = createElements();
+            if (window.MiOpenTwoW && typeof window.MiOpenTwoW.init === "function") {
+                window.MiOpenTwoW.init(app);
+            }
+            app.state.twowPageReady = true;
+        }
+        if (page === "logs" && !app.state.logsPageReady) {
+            app.state.logsPageReady = true;
+            app.elements = createElements();
+            initSuggestions(app);
+            initHelpButtons(app);
+            bindEvents(app);
+            app.loadLogBuffer();
+            app.fetchAndDisplayDevices();
+            window.MiOpenApi.requestJson("/api/lastaddr").then(function (data) {
+                app.elements = createElements();
+                if (app.elements.lastAddrInput) {
+                    app.elements.lastAddrInput.value = data.address || "";
+                }
+            }).catch(function () {});
+        }
+        if (page === "settings" && !app.state.settingsPageReady) {
+            window.MiOpenSettings.init(app);
+            app.state.settingsPageReady = true;
+            bindEvents(app);
+            [
+                app.loadMqttConfig,
+                app.loadWifiConfig,
+                app.loadNetworkConfig,
+                app.loadFallbackConfig,
+                app.loadDisplayConfig,
+                app.loadSyslogConfig
+            ].forEach(function (loader, index) {
+                if (typeof loader === "function") {
+                    setTimeout(function () {
+                        loader.call(app);
+                    }, index * 150);
+                }
+            });
+        }
+        if (typeof window.applyI18n === "function") {
+            window.applyI18n();
+        }
+    }
     document.addEventListener("DOMContentLoaded", function () {
-        ensureApiModule();
 
         const app = {
             elements: createElements(),
@@ -370,46 +420,68 @@
             loadLogBuffer: function () {
                 return loadLogBuffer(app);
             },
+            setActivePage: function (page) {
+                app.state.activePage = page;
+                sendLogSubscription(app, page === "logs");
+            },
+            initDynamicPage: function (page) {
+                initDynamicPage(app, page);
+            },
             state: {
                 devicesCache: [],
-                ws: null
+                devicesLoadingPromise: null,
+                ws: null,
+                activePage: currentHashPage(),
+                settingsPageReady: false,
+                logsPageReady: false,
+                twowPageReady: false
             }
         };
 
         window.MiOpenPopup.init(app);
         window.MiOpenDevices.init(app);
+        window.MiOpenTwoW.init(app);
+        window.MiOpenDevicePairing.init(app);
         window.MiOpenRemotes.init(app);
-        window.MiOpenSettings.init(app);
         window.MiOpenApp = app;
 
         initSuggestions(app);
         initTheme(app);
         initHelpButtons(app);
-        initWebSocket(app);
+        setTimeout(function () {
+            initWebSocket(app);
+        }, 800);
         bindEvents(app);
 
         window.addEventListener("i18n:changed", function () {
             app.fetchAndDisplayDevices();
-            app.fetchAndDisplayRemotes();
         });
 
-        window.MiOpenApi.requestJson("/api/info").then(function (info) {
+        setTimeout(function () {
+            window.MiOpenApi.requestJson("/api/info").then(function (info) {
             const el = document.getElementById("firmware-version");
             if (el && info.version) {
-                el.textContent = "Firmware: " + info.version;
+                const branch = info.branch ? " (" + info.branch + ")" : "";
+                el.textContent = "Firmware: " + info.version + branch;
             }
-        }).catch(function () {});
+            const diag = document.getElementById("system-diagnostics");
+            if (diag) {
+                diag.textContent = "Heap " + (info.freeHeap || 0) +
+                    " | min " + (info.minFreeHeap || 0) +
+                    " | block " + (info.largestFreeBlock || 0) +
+                    " | WS " + (info.wsClients || 0) +
+                    " | uptime " + (info.uptimeDays || 0) + "d";
+            }
+            }).catch(function () {});
+        }, 250);
 
-        app.loadLogBuffer();
-        app.loadMqttConfig();
-        app.loadWifiConfig();
-        app.loadNetworkConfig();
-        app.loadFallbackConfig();
-        app.loadDisplayConfig();
-        app.loadSyslogConfig();
-        app.fetchAndDisplayDevices();
-        app.fetchAndDisplayRemotes();
-        app.loadLastAddress();
+        if (currentHashPage() === "devices") {
+            app.fetchAndDisplayDevices().then(function () {
+                if (typeof app.fetchAndDisplayRemotes === "function") {
+                    app.fetchAndDisplayRemotes();
+                }
+            });
+        }
+
     });
 })();
-

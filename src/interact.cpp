@@ -31,6 +31,9 @@
 #endif
 #include <nvs_helpers.h>
 #include <log_buffer.h>
+#if defined(WEBSERVER)
+#include <web_server_handler.h>
+#endif
 
 ConnState mqttStatus = ConnState::Disconnected;
 
@@ -51,6 +54,7 @@ namespace Cmd {
 std::atomic<bool> verbosity = true;
 std::atomic<bool> pairMode = false;
 std::atomic<bool> pairAltMode = false;
+std::atomic<bool> pairKeyMode = false;
 std::atomic<bool> scanMode = false;
 #if defined(ESP32)
 TimersUS::TickerUsESP32 kbd_tick;
@@ -58,13 +62,31 @@ TimersUS::TickerUsESP32 kbd_tick;
 TimerHandle_t consoleTimer;
 static TimerHandle_t twoWPairTimer = nullptr;
 
+uint32_t twoWPairingRemainingMs() {
+    if (!pairMode || !twoWPairTimer || !xTimerIsTimerActive(twoWPairTimer)) return 0;
+    const int32_t ticks = static_cast<int32_t>(xTimerGetExpiryTime(twoWPairTimer) - xTaskGetTickCount());
+    return ticks > 0 ? static_cast<uint32_t>(ticks) * portTICK_PERIOD_MS : 0;
+}
+
 static void twoWPairTimeout(TimerHandle_t) {
-    pairMode = false;
+    const bool expired = pairMode.exchange(false);
     pairAltMode = false;
+    pairKeyMode = false;
     resetTwoWPairingSession();
+    if (expired) {
+        IOHC::iohcRadio::getInstance()->stopTwoWScan();
+        addLogMessage("2W pairing timed out before key confirmation (0x33)");
+#if defined(WEBSERVER)
+        updateTwoWTxStatus("pair2W", "2W pairing timed out before key confirmation (0x33)", true);
+#endif
+    }
 }
 
 void extendTwoWPairingWindow(uint32_t windowMs) {
+    scanMode = false;
+#if defined(WEBSERVER)
+    updateTwoWTxStatus("pair2W", "2W pairing started; waiting for device", false);
+#endif
     IOHC::iohcRadio::getInstance()->startTwoWScan(
         windowMs, TWOW_SLOW_SCAN_INTERVAL_US);
     if (!twoWPairTimer) {
@@ -83,6 +105,7 @@ static void startTwoWPairingWindow(uint32_t windowMs) {
     setCrashMarker("pair2W: open pairing window");
     pairMode = true;
     pairAltMode = false;
+    pairKeyMode = false;
     resetTwoWPairingSession();
     addLogMessage("2W pairing window opened");
     setCrashMarker("pair2W: start 2W scan");
@@ -93,10 +116,25 @@ static void startTwoWPairingWindow(uint32_t windowMs) {
     IOHC::iohcOtherDevice2W::getInstance()->cmd(IOHC::Other2WButton::discover28, nullptr);
 }
 
+static void startTwoWKeyPairingWindow(uint32_t windowMs) {
+    setCrashMarker("pair2Wkey: open pairing window");
+    pairMode = true;
+    pairAltMode = false;
+    pairKeyMode = true;
+    resetTwoWPairingSession();
+    addLogMessage("2W key pair window opened");
+    setCrashMarker("pair2Wkey: start 2W scan");
+    addLogMessage("2W key pair trace: starting scan");
+    extendTwoWPairingWindow(windowMs);
+    setCrashMarker("pair2Wkey: send discover28");
+    addLogMessage("2W key pair trace: sending discover28");
+    IOHC::iohcOtherDevice2W::getInstance()->cmd(IOHC::Other2WButton::discover28, nullptr);
+}
 static void startTwoWPairingWindowAlt(uint32_t windowMs) {
     setCrashMarker("pair2Walt: open pairing window");
     pairMode = true;
     pairAltMode = true;
+    pairKeyMode = false;
     resetTwoWPairingSession();
     addLogMessage("2W alternate pairing window opened");
     setCrashMarker("pair2Walt: start 2W scan");
@@ -107,10 +145,7 @@ static void startTwoWPairingWindowAlt(uint32_t windowMs) {
     addLogMessage("2W alt pair trace: sending discover28");
     IOHC::iohcOtherDevice2W::getInstance()->cmd(IOHC::Other2WButton::discover28, nullptr);
 
-    vTaskDelay(pdMS_TO_TICKS(1200));
-    setCrashMarker("pair2Walt: send discover2A");
-    addLogMessage("2W alt pair trace: sending discover2A");
-    IOHC::iohcOtherDevice2W::getInstance()->cmd(IOHC::Other2WButton::discover2A, nullptr);
+    // Do not inject a second discovery while the actuator's key exchange is in progress.
 }
 
 static void startTwoWPairingTask(void *param) {
@@ -120,6 +155,12 @@ static void startTwoWPairingTask(void *param) {
     vTaskDelete(nullptr);
 }
 
+static void startTwoWKeyPairingTask(void *param) {
+    const uint32_t windowMs = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(param));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    startTwoWKeyPairingWindow(windowMs);
+    vTaskDelete(nullptr);
+}
 static void startTwoWPairingAltTask(void *param) {
     const uint32_t windowMs = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(param));
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -345,6 +386,7 @@ void createCommands() {
     });
     Cmd::addHandler((char *) "scanMode", (char *) "scanMode", [](Tokens *cmd)-> void {
         scanMode = true;
+        IOHC::iohcRadio::getInstance()->startTwoWScan(30000, TWOW_SCAN_INTERVAL_US);
         IOHC::iohcOtherDevice2W::getInstance()->cmd(IOHC::Other2WButton::checkCmd, nullptr);
     });
     Cmd::addHandler((char *) "scanDump", (char *) "Dump Scan Results", [](Tokens *cmd)-> void {
@@ -384,6 +426,30 @@ void createCommands() {
         }
     });
 
+    Cmd::addHandler((char *) "pair2Wkey", (char *) "Start laberning-style 2W key pairing window", [](Tokens *cmd)-> void {
+        setCrashMarker("command: pair2Wkey");
+        uint32_t windowMs = 90000;
+        if (cmd && cmd->size() > 1) {
+            const uint32_t seconds = strtoul(cmd->at(1).c_str(), nullptr, 10);
+            if (seconds >= 10 && seconds <= 180) {
+                windowMs = seconds * 1000UL;
+            }
+        }
+        BaseType_t taskCreated = xTaskCreate(
+            startTwoWKeyPairingTask,
+            "pair2Wkey",
+            4096,
+            reinterpret_cast<void *>(static_cast<uintptr_t>(windowMs)),
+            1,
+            nullptr
+        );
+        if (taskCreated != pdPASS) {
+            addLogMessage("2W key pair trace: task create failed, running inline");
+            startTwoWKeyPairingWindow(windowMs);
+        } else {
+            addLogMessage("2W key pair trace: scheduled");
+        }
+    });
     Cmd::addHandler((char *) "pair2Walt", (char *) "Start alternate 2W pairing window", [](Tokens *cmd)-> void {
         setCrashMarker("command: pair2Walt");
         uint32_t windowMs = 90000;
@@ -461,7 +527,11 @@ void createCommands() {
         nvs_write_string(NVS_KEY_MQTT_USER, mqtt_user);
 
         mqttClient.disconnect();
-        mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+        if (mqtt_allow_anonymous) {
+            mqttClient.setCredentials(nullptr, nullptr);
+        } else {
+            mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+        }
         connectToMqtt();
     });
     Cmd::addHandler((char *) "mqttId", (char *) "Set MQTT client ID", [](Tokens *cmd)-> void {
@@ -487,7 +557,11 @@ void createCommands() {
         nvs_write_string(NVS_KEY_MQTT_PASSWORD, mqtt_password);
 
         mqttClient.disconnect();
-        mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+        if (mqtt_allow_anonymous) {
+            mqttClient.setCredentials(nullptr, nullptr);
+        } else {
+            mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+        }
         connectToMqtt();
     });
     Cmd::addHandler((char *) "mqttPort", (char *) "Set MQTT port", [](Tokens *cmd)-> void {
@@ -599,13 +673,8 @@ bool addHandler(char *cmd, char *description, void (*handler)(Tokens*)) {
 
       _cmdHandler[idx] = static_cast<_cmdEntry *>(alloc);
       memset(alloc, 0, sizeof(struct _cmdEntry));
-      strncpy(_cmdHandler[idx]->cmd, cmd,
-              strlen(cmd) < sizeof(_cmdHandler[idx]->cmd) ? strlen(cmd)
-                                                          : sizeof(_cmdHandler[idx]->cmd) - 1);
-      strncpy(_cmdHandler[idx]->description, description,
-              strlen(cmd) < sizeof(_cmdHandler[idx]->description)
-                  ? strlen(description)
-                  : sizeof(_cmdHandler[idx]->description) - 1);
+      snprintf(_cmdHandler[idx]->cmd, sizeof(_cmdHandler[idx]->cmd), "%s", cmd);
+      snprintf(_cmdHandler[idx]->description, sizeof(_cmdHandler[idx]->description), "%s", description);
       _cmdHandler[idx]->handler = handler;
 
       if (idx > lastEntry)

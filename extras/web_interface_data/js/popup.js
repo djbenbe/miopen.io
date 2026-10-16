@@ -1,4 +1,13 @@
 (function () {
+    let onClose = null;
+    let returnFocus = null;
+
+    function cleanupPopup() {
+        const callback = onClose;
+        onClose = null;
+        if (callback) callback();
+    }
+
     function createParagraphs(container, items) {
         container.textContent = "";
         items.forEach(function (item) {
@@ -10,10 +19,14 @@
 
     function closePopup() {
         document.getElementById("popup").classList.remove("open");
+        cleanupPopup();
+        if (returnFocus && returnFocus.isConnected) returnFocus.focus();
     }
 
     function openPopup(app, title, label, items, content, options) {
+        cleanupPopup();
         const popup = document.getElementById("popup");
+        if (!popup.classList.contains("open")) returnFocus = document.activeElement;
         const labelInput = document.getElementById("label-input");
         const labelTiming = document.getElementById("label-timing");
         const inputTiming = document.getElementById("popup-input-timing");
@@ -39,6 +52,9 @@
         const popupTitle = document.getElementById("popup-title");
 
         const popupOptions = options || {};
+        onClose = popupOptions.onClose || null;
+        document.getElementById("device-add-panel").hidden = !popupOptions.showDevicePairing;
+        popup.classList.toggle("device-pairing", !!popupOptions.showDevicePairing);
         popupTitle.textContent = title;
         labelInput.textContent = label;
         const protectedMessage = popupOptions.protectedMessage ||
@@ -212,9 +228,31 @@
         };
 
         popup.classList.add("open");
+        const firstInput = popup.querySelector("input:not([type=checkbox])");
+        if (showInput && firstInput) firstInput.focus();
     }
 
     function init(app) {
+        const popup = document.getElementById("popup");
+        document.addEventListener("keydown", function (event) {
+            if (!popup.classList.contains("open")) return;
+            if (event.key === "Escape") {
+                event.preventDefault();
+                closePopup();
+            } else if (event.key === "Tab") {
+                const controls = Array.from(popup.querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled])"))
+                    .filter(function (element) { return element.offsetParent !== null; });
+                const first = controls[0];
+                const last = controls[controls.length - 1];
+                if (event.shiftKey && document.activeElement === first) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
+            }
+        });
         app.openPopup = function (title, label, items, content, options) {
             openPopup(app, title, label, items, content, options);
         };

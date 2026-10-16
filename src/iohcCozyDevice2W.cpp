@@ -299,6 +299,7 @@ namespace IOHC {
         }
 
 
+        devices.clear();
         // Iterate through the JSON object
         for (JsonPair kv: doc.as<JsonObject>()) {
             device d;

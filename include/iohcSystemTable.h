@@ -22,6 +22,7 @@
 #include <iohcObject.h>
 
 #define IOHC_SYS_TABLE  "/sysTable.json"
+#define IOHC_2W_PAIRING_FILE "/2W.json"
 
 /*
     Singleton class to implement the System Object Table.
@@ -47,12 +48,14 @@ namespace IOHC {
             inline Objects::iterator begin();
             inline Objects::iterator end();
             bool save(bool force = false);
+            bool load();
+            bool savePairing(const address controller);
+            bool loadPairing(const address controller);
             void dump1W();
             void dump2W();
 
         private:
             iohcSystemTable();
-            bool load();
             bool changed = false;
 
             static iohcSystemTable *_iohcSystemTable;

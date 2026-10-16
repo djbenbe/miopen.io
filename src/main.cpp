@@ -87,6 +87,8 @@ enum class TwoWPairStage : uint8_t {
     Idle,
     AwaitDiscoverAnswer,
     AwaitActuatorAck,
+    AwaitKeyChallenge,
+    AwaitKeyAck,
     AwaitKeyTransfer,
     AwaitKeyAuthentication
 };
@@ -181,7 +183,8 @@ static bool verifySolarChallenge(const uint8_t *key) {
 }
 
 static bool isPairingPeer(const IOHC::iohcPacket *packet) {
-    return packet &&
+    return packet && packet->payload.packet.header.CtrlByte1.asStruct.Protocol == 0 &&
+           sameAddress(otherDevice2W->gateway, packet->payload.packet.header.target) &&
            memcmp(twoWPairSession.peer, packet->payload.packet.header.source,
                   sizeof(IOHC::address)) == 0;
 }
@@ -189,19 +192,31 @@ static bool isPairingPeer(const IOHC::iohcPacket *packet) {
 static IOHC::iohcPacket *makeTwoWPairPacket(
     uint8_t command, const std::vector<uint8_t> &data,
     const IOHC::address target, uint32_t frequency,
-    bool startFrame, bool endFrame, bool acknowledgement) {
+    bool startFrame, bool endFrame, bool lowPower) {
     auto *packet = new IOHC::iohcPacket;
     forgePacket(packet, data);
     packet->payload.packet.header.cmd = command;
     packet->payload.packet.header.CtrlByte1.asStruct.StartFrame = startFrame;
     packet->payload.packet.header.CtrlByte1.asStruct.EndFrame = endFrame;
     packet->payload.packet.header.CtrlByte2.asByte = 0;
-    packet->payload.packet.header.CtrlByte2.asStruct.Prio = acknowledgement;
+    packet->payload.packet.header.CtrlByte2.asStruct.LPM = lowPower;
     memcpy(packet->payload.packet.header.source, otherDevice2W->gateway, 3);
     memcpy(packet->payload.packet.header.target, target, 3);
     packet->frequency = frequency;
-    packet->repeatTime = 50;
+    packet->repeatTime = 1;
     return packet;
+}
+
+static void finishTwoWPairing(const String &message, bool failed) {
+    Cmd::pairMode = false;
+    Cmd::pairAltMode = false;
+    Cmd::pairKeyMode = false;
+    radioInstance->stopTwoWScan();
+    resetTwoWPairingSession();
+    addLogMessage(message);
+#if defined(WEBSERVER)
+    updateTwoWTxStatus("pair2W", message, failed);
+#endif
 }
 
 static void fillRandom(std::array<uint8_t, 6> &value) {
@@ -272,6 +287,11 @@ void setup() {
     Serial.println("LittleFS mounted successfully");
 #endif
     nvs_init();
+    std::string savedSystemKey;
+    if (nvs_read_string(NVS_KEY_2W_SYSTEM, savedSystemKey) && savedSystemKey.size() == 32 &&
+        savedSystemKey.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos) {
+        hexStringToBytes(savedSystemKey, system_key);
+    }
 
     // Load 1W device definitions before starting network services so
     // that /api/devices can immediately return the configured remotes.
@@ -285,6 +305,13 @@ void setup() {
 
     cozyDevice2W = IOHC::iohcCozyDevice2W::getInstance();
     otherDevice2W = IOHC::iohcOtherDevice2W::getInstance();
+    if (LittleFS.exists(IOHC_2W_PAIRING_FILE)) {
+        if (!sysTable->loadPairing(otherDevice2W->gateway)) {
+            addLogMessage("Could not load 2W.json; retaining legacy 2W data");
+        }
+    } else if (!sysTable->savePairing(otherDevice2W->gateway)) {
+        addLogMessage("Could not create 2W.json from legacy 2W data");
+    }
     remoteMap = IOHC::iohcRemoteMap::getInstance();
 
     //   AES_init_ctx(&ctx, transfert_key); // PreInit AES for cozy (1W use original version) TODO
@@ -535,23 +562,27 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
         }
         case iohcDevice::RECEIVED_DISCOVER_ANSWER_0x29: {
             printf("2W Device want to be paired\n");
-            if (!Cmd::pairMode) break;
-            if (iohc->buffer_length < 18) {
+            if (!Cmd::pairMode ||
+                twoWPairSession.stage != TwoWPairStage::AwaitDiscoverAnswer ||
+                iohc->payload.packet.header.CtrlByte1.asStruct.Protocol != 0 ||
+                !sameAddress(otherDevice2W->gateway, iohc->payload.packet.header.target)) break;
+            if (iohc->buffer_length < 11) {
                 addLogMessage("2W pair error: short 0x29 discovery answer");
                 break;
             }
-            addLogMessage("2W pair step: received 0x29 discover answer; sending 0x2C actuator discover");
 
             memcpy(twoWPairSession.peer, iohc->payload.packet.header.source, 3);
+            twoWPairSession.metadata.fill(0);
             memcpy(twoWPairSession.metadata.data(), iohc->payload.buffer + 9,
-                   twoWPairSession.metadata.size());
+                   std::min<size_t>(iohc->buffer_length - 9, twoWPairSession.metadata.size()));
             twoWPairSession.frequency = iohc->frequency;
+            addLogMessage("2W pair step: received 0x29 discover answer; sending 0x2C actuator discover");
             twoWPairSession.stage = TwoWPairStage::AwaitActuatorAck;
 
             auto *packet = makeTwoWPairPacket(
                 iohcDevice::SEND_DISCOVER_ACTUATOR_0x2C, {},
                 twoWPairSession.peer, twoWPairSession.frequency,
-                true, false, false);
+                true, false, true);
             radioInstance->send(packet);
             break;
         }
@@ -692,6 +723,49 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
             break;
         }
         case iohcDevice::RECEIVED_CHALLENGE_REQUEST_0x3C: {
+            if (Cmd::pairMode &&
+                (twoWPairSession.stage == TwoWPairStage::AwaitKeyChallenge ||
+                 twoWPairSession.stage == TwoWPairStage::AwaitKeyAck)) {
+                if (!isPairingPeer(iohc) || iohc->buffer_length != 15) break;
+                const std::string encodedKey = bytesToHexString(system_key, sizeof(system_key));
+                if (!sysTable->savePairing(otherDevice2W->gateway)) {
+                    finishTwoWPairing("2W pairing failed: could not store 2W.json", true);
+                    break;
+                }
+                std::string savedKey;
+                if (!nvs_read_string(NVS_KEY_2W_SYSTEM, savedKey) || savedKey != encodedKey) {
+                    if (!nvs_write_string_checked(NVS_KEY_2W_SYSTEM, encodedKey)) {
+                        addLogMessage("2W key stored in 2W.json; NVS mirror could not be updated");
+                    }
+                }
+                const bool transferringKey = twoWPairSession.stage == TwoWPairStage::AwaitKeyChallenge;
+                std::vector<uint8_t> challenge(iohc->payload.buffer + 9, iohc->payload.buffer + 15);
+                std::vector<uint8_t> command = {iohcDevice::SEND_ASK_CHALLENGE_0x31};
+                if (!transferringKey) {
+                    command.assign(twoWPairSession.transferredFrameData.begin(),
+                                   twoWPairSession.transferredFrameData.end());
+                }
+                uint8_t encryptedKey[16] = {};
+                constructInitialValue(command, encryptedKey, command.size(), challenge, nullptr);
+                AES_ctx transferContext;
+                AES_init_ctx(&transferContext, transferringKey ? transfert_key : system_key);
+                AES_ECB_encrypt(&transferContext, encryptedKey);
+                if (transferringKey) {
+                    for (size_t i = 0; i < sizeof(encryptedKey); ++i) encryptedKey[i] ^= system_key[i];
+                    twoWPairSession.transferredFrameData[0] = iohcDevice::SEND_KEY_TRANSFERT_0x32;
+                    memcpy(twoWPairSession.transferredFrameData.data() + 1, encryptedKey, sizeof(encryptedKey));
+                }
+                std::vector<uint8_t> payload(encryptedKey, encryptedKey + (transferringKey ? 16 : 6));
+                auto *packet = makeTwoWPairPacket(
+                    transferringKey ? iohcDevice::SEND_KEY_TRANSFERT_0x32 : iohcDevice::SEND_CHALLENGE_ANSWER_0x3D, payload,
+                    twoWPairSession.peer, iohc->frequency, false, false, false);
+                twoWPairSession.stage = TwoWPairStage::AwaitKeyAck;
+                radioInstance->send(packet);
+                addLogMessage(transferringKey ? "2W pair step: received 0x3C; sent 0x32, waiting for 0x33"
+                                             : "2W pair step: authenticated key transfer with 0x3D; waiting for 0x33");
+                break;
+            }
+            if (Cmd::pairMode) break;
             // Answer only to our gateway, not to others devices
             if (cozyDevice2W->isFake(iohc->payload.packet.header.source, iohc->payload.packet.header.target)) {
                 // (true) { //
@@ -713,6 +787,7 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
 
                 if (Cmd::scanMode) {
                     otherDevice2W->mapValid[lastSendCmd] = iohcDevice::RECEIVED_CHALLENGE_REQUEST_0x3C;
+                    updateTwoWSurveyResult(static_cast<uint8_t>(lastSendCmd), iohcDevice::RECEIVED_CHALLENGE_REQUEST_0x3C);
                     break;
                 }
 
@@ -735,7 +810,7 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
                     constructInitialValue(IVdata, initial_value, 1, challengeAsked, nullptr);
                     AES_ECB_encrypt(&ctx, initial_value);
                     for (int i = 0; i < dataLen; i++)
-                        initial_value[i] = initial_value[i] ^ transfert_key[i];
+                        initial_value[i] = initial_value[i] ^ (Cmd::pairKeyMode ? system_key[i] : transfert_key[i]);
                     cozyDevice2W->memorizeSend.memorizedCmd = IOHC::iohcDevice::SEND_KEY_TRANSFERT_0x32;
                     cozyDevice2W->memorizeSend.memorizedData.assign(initial_value, initial_value + 16);
                 }
@@ -767,6 +842,20 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
             }
             break;
         }
+        case iohcDevice::RECEIVED_KEY_TRANSFERT_ACK_0x33: {
+            if (Cmd::pairMode &&
+                twoWPairSession.stage == TwoWPairStage::AwaitKeyAck &&
+                isPairingPeer(iohc) && iohc->buffer_length == sizeof(_header)) {
+                const bool saved = sysTable->addObject(
+                    twoWPairSession.peer, twoWPairSession.metadata.data() + 2,
+                    twoWPairSession.metadata.data(), twoWPairSession.metadata[5],
+                      twoWPairSession.metadata[6]) && sysTable->savePairing(otherDevice2W->gateway);
+                const String peer = bytesToHexString(twoWPairSession.peer, 3).c_str();
+                finishTwoWPairing(saved ? "2W pairing completed and saved: " + peer
+                                       : "2W key accepted but device storage failed: " + peer, !saved);
+            }
+            break;
+        }
         case iohcDevice::RECEIVED_CHALLENGE_ANSWER_0x3D: {
             if (!Cmd::pairMode ||
                 twoWPairSession.stage != TwoWPairStage::AwaitKeyAuthentication ||
@@ -791,6 +880,7 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
                 addLogMessage("2W pairing failed: transferred key authentication rejected");
                 Cmd::pairMode = false;
                 Cmd::pairAltMode = false;
+                Cmd::pairKeyMode = false;
                 radioInstance->stopTwoWScan();
                 resetTwoWPairingSession();
                 break;
@@ -816,6 +906,7 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
                 String(bytesToHexString(twoWPairSession.peer, 3).c_str()));
             Cmd::pairMode = false;
             Cmd::pairAltMode = false;
+            Cmd::pairKeyMode = false;
             radioInstance->stopTwoWScan();
             resetTwoWPairingSession();
             break;
@@ -840,14 +931,18 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
                 display1WAction(iohc->payload.packet.header.source, action, "RX");
                 if (const auto *map = remoteMap->find(iohc->payload.packet.header.source)) {
                     IOHC::RemoteButton btn;
+                    bool recognized = true;
                     if (!strcmp(action, "OPEN")) btn = IOHC::RemoteButton::Open;
                     else if (!strcmp(action, "CLOSE")) btn = IOHC::RemoteButton::Close;
                     else if (!strcmp(action, "STOP")) btn = IOHC::RemoteButton::Stop;
                     else if (!strcmp(action, "VENT")) btn = IOHC::RemoteButton::Vent;
                     else if (!strcmp(action, "FORCE")) btn = IOHC::RemoteButton::ForceOpen;
-                    else btn = IOHC::RemoteButton::Stop; // default to avoid uninitialized
-                    for (const auto &desc : map->devices) {
-                        iohcRemote1W::getInstance()->handleRemoteAction(btn, desc);
+                    else recognized = false; // unsupported 1W command - ignore, don't dispatch as a phantom Stop
+
+                    if (recognized) {
+                        for (const auto &desc : map->devices) {
+                            iohcRemote1W::getInstance()->handleRemoteAction(btn, desc);
+                        }
                     }
                 }
             } else {
@@ -897,25 +992,22 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
         case iohcDevice::RECEIVED_DISCOVER_ACTUATOR_ACK_0x2D: {
             if (Cmd::pairMode &&
                 twoWPairSession.stage == TwoWPairStage::AwaitActuatorAck &&
-                isPairingPeer(iohc)) {
-                fillRandom(twoWPairSession.transferChallenge);
-                std::vector<uint8_t> challenge(
-                    twoWPairSession.transferChallenge.begin(),
-                    twoWPairSession.transferChallenge.end());
+                isPairingPeer(iohc) && iohc->buffer_length == sizeof(_header)) {
                 auto *packet = makeTwoWPairPacket(
-                    iohcDevice::SEND_LAUNCH_KEY_TRANSFERT_0x38, challenge,
+                    iohcDevice::SEND_ASK_CHALLENGE_0x31, {},
                     twoWPairSession.peer, iohc->frequency,
                     true, false, true);
                 twoWPairSession.frequency = iohc->frequency;
-                twoWPairSession.stage = TwoWPairStage::AwaitKeyTransfer;
-                addLogMessage("2W pair step: received 0x2D ack; requesting key with 0x38");
+                twoWPairSession.stage = TwoWPairStage::AwaitKeyChallenge;
                 radioInstance->send(packet);
+                addLogMessage("2W pair step: received 0x2D; sent 0x31, waiting for 0x3C");
                 break;
             }
             if (Cmd::scanMode) {
                 otherDevice2W->memorizeOther2W = {};
                 otherDevice2W->mapValid[IOHC::lastSendCmd.load()] =
                     iohc->payload.packet.header.cmd;
+                updateTwoWSurveyResult(static_cast<uint8_t>(IOHC::lastSendCmd.load()), iohc->payload.packet.header.cmd);
             }
             break;
         }
@@ -929,14 +1021,21 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
                 otherDevice2W->memorizeOther2W = {};
                 // printf(" Answer %X Cmd %X ", iohc->payload.packet.header.cmd, IOHC::lastSendCmd);
                 otherDevice2W->mapValid[IOHC::lastSendCmd.load()] = iohc->payload.packet.header.cmd;
+                updateTwoWSurveyResult(static_cast<uint8_t>(IOHC::lastSendCmd.load()), iohc->payload.packet.header.cmd);
             }
         break;
     }
         case iohcDevice::RECEIVED_STATUS_0xFE: {
+            if (Cmd::pairMode && isPairingPeer(iohc) && iohc->buffer_length >= 10) {
+                finishTwoWPairing("2W pairing rejected: CMD FE " +
+                    String(to_hex_str(iohc->payload.buffer[9]).c_str()), true);
+                break;
+            }
             if (Cmd::scanMode) {
                 otherDevice2W->memorizeOther2W = {};
                 // printf(" Unknown %X Cmd %X ", iohc->payload.buffer[9], IOHC::lastSendCmd);
                 otherDevice2W->mapValid[IOHC::lastSendCmd.load()] = iohc->payload.buffer[9];
+                updateTwoWSurveyResult(static_cast<uint8_t>(IOHC::lastSendCmd.load()), iohc->payload.buffer[9]);
             }
             break;
         }
@@ -977,6 +1076,7 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
                     deviceId + " authenticated and stored");
                 Cmd::pairMode = false;
                 Cmd::pairAltMode = false;
+                Cmd::pairKeyMode = false;
                 radioInstance->stopTwoWScan();
                 resetTwoWPairingSession();
             } else {

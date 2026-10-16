@@ -47,7 +47,7 @@ namespace IOHC {
     volatile iohcRadio::RadioState iohcRadio::radioState = iohcRadio::RadioState::IDLE;
     TaskHandle_t iohcRadio::txTaskHandle = nullptr;
     volatile bool iohcRadio::txComplete = false;
-    volatile bool iohcRadio::txBatchActive = false;
+    std::atomic<bool> iohcRadio::txBatchActive{false};
 
 
     TaskHandle_t handle_interrupt;
@@ -96,6 +96,15 @@ namespace IOHC {
         // During pairing, early 2W discovery packets must not switch the radio
         // into fast FHSS scan. Start that window only after key transfer.
         return packet->payload.packet.header.cmd == 0x32;
+    }
+
+    static uint16_t transmitPreambleBytes(const iohcPacket *packet) {
+        if (packet->payload.packet.header.CtrlByte1.asStruct.Protocol == 0) {
+            // Solar actuators may need waking again for the authentication response.
+            return packet->payload.packet.header.CtrlByte1.asStruct.StartFrame ||
+                   packet->payload.packet.header.cmd == 0x3D ? 1024 : 8;
+        }
+        return LONG_PREAMBLE_MS;
     }
     /**
      * The function `handle_interrupt_task` waits for a notification and then calls the `tickerCounter`
@@ -170,7 +179,8 @@ namespace IOHC {
         }
     }
 
-    iohcRadio::iohcRadio() {
+    iohcRadio::iohcRadio() : sendQueueMutex(xSemaphoreCreateMutex()) {
+        configASSERT(sendQueueMutex);
         Radio::initHardware();
         Radio::calibrate();
 
@@ -290,6 +300,8 @@ namespace IOHC {
             addLogMessage("2W scan not started; radio frequencies not configured");
             return;
         }
+        Radio::applyTwoWHomeControlProfile();
+        addLogMessage("Radio profile: 2W home_io_control SX1276");
         twoWScanActive = true;
         twoWScanUntilMs = millis() + windowMs;
         num_freqs = configuredNumFreqs;
@@ -299,6 +311,7 @@ namespace IOHC {
         }
         currentFreqIdx = 0;
         tickCounter = 0;
+        twoWResponseUntilMs = 0;
         preCounter = 0;
         twoWPayloadIrqCount = 0;
         twoWSyncIrqCount = 0;
@@ -342,6 +355,8 @@ namespace IOHC {
         currentFreqIdx = 0;
         tickCounter = 0;
         preCounter = 0;
+        Radio::applyDefaultRadioProfile();
+        addLogMessage("Radio profile: default SX1276");
         Radio::clearBuffer();
         Radio::clearFlags();
         Radio::setCarrier(Radio::Carrier::Frequency, scan_freqs[currentFreqIdx]);
@@ -469,6 +484,12 @@ namespace IOHC {
             }
         }
 
+        // Keep the transaction channel while a short challenge/ack can arrive.
+        if (radio->twoWResponseUntilMs != 0) {
+            if (static_cast<int32_t>(radio->twoWResponseUntilMs - millis()) > 0) return;
+            radio->twoWResponseUntilMs = 0;
+        }
+
         //if (++radio->tickCounter * SM_GRANULARITY_US < radio->scanTimeUs) return;
         radio->tickCounter = radio->tickCounter + 1;
         if (radio->tickCounter * SM_GRANULARITY_US < radio->scanTimeUs) return;
@@ -529,21 +550,30 @@ void iohcRadio::queueSend(std::vector<iohcPacket *> &iohcTx) {
     if (iohcTx.empty()) {
         return;
     }
+    xSemaphoreTake(sendQueueMutex, portMAX_DELAY);
     sendQueue.push(std::move(iohcTx));
-    ets_printf("TX: Queued send batch. Queue depth=%d\n", static_cast<int>(sendQueue.size()));
+    const auto queueDepth = sendQueue.size();
+    xSemaphoreGive(sendQueueMutex);
+    ets_printf("TX: Queued send batch. Queue depth=%d\n", static_cast<int>(queueDepth));
 }
 
 void iohcRadio::startQueuedSend() {
-    if (radioState == RadioState::TX || packets2send.size() > 0 || sendQueue.empty()) {
+    // Claim the next batch under the queue lock, before touching radio hardware.
+    // Test the active flag first: the timer may still be finishing the old batch.
+    xSemaphoreTake(sendQueueMutex, portMAX_DELAY);
+    if (txBatchActive || radioState == RadioState::TX || !packets2send.empty() || sendQueue.empty()) {
+        xSemaphoreGive(sendQueueMutex);
         return;
     }
 
-    setCrashMarker("radio: startQueuedSend");
     packets2send = std::move(sendQueue.front());
     sendQueue.pop();
     txCounter = 0;
     txComplete = false;
     txBatchActive = true;
+    xSemaphoreGive(sendQueueMutex);
+
+    setCrashMarker("radio: startQueuedSend");
     resumeTwoWScanAfterTx = twoWScanActive && twoWScanUntilMs > millis();
     resumeTwoWScanUntilMs = resumeTwoWScanAfterTx ? twoWScanUntilMs : 0;
     resumeTwoWScanWindowMs = resumeTwoWScanAfterTx
@@ -565,9 +595,8 @@ void iohcRadio::startQueuedSend() {
 
     auto packet = packets2send[txCounter];
 
-    // 🟢 Set long preamble for first packet
-    Radio::setPreambleLength(LONG_PREAMBLE_MS);
-    ets_printf("TX: Using LONG preamble (%d ms)\n", LONG_PREAMBLE_MS);
+    // Select the preamble for this frame's protocol and exchange stage.
+    Radio::setPreambleLength(transmitPreambleBytes(packet));
 
     // Send first packet immediately
     Radio::setStandby();
@@ -580,12 +609,13 @@ void iohcRadio::startQueuedSend() {
     txStartedAtUs = esp_timer_get_time();
     //packetStamp = esp_timer_get_time();
     //packet->decode(true); //false);
-    //IOHC::lastSendCmd = packet->payload.packet.header.cmd;
+    IOHC::lastSendCmd.store(packet->payload.packet.header.cmd);
 
     ets_printf("TX: Sent first packet (%d repeats) at %llu us\n", packet->repeat, esp_timer_get_time());
 
     // Start ticker for repeats (short preamble)
-    Sender.attach_ms(packet->repeatTime, &iohcRadio::onTxTicker, (void*)this);
+    Sender.attach_ms(packet->payload.packet.header.CtrlByte1.asStruct.Protocol == 0 ? 1 : packet->repeatTime,
+                     &iohcRadio::onTxTicker, (void*)this);
 }
 
 void iohcRadio::send(iohcPacket *packet) {
@@ -604,10 +634,15 @@ void iohcRadio::onTxTicker(void *arg) {
     iohcRadio *radio = (iohcRadio *)arg;
     auto packet = radio->packets2send[radio->txCounter];
 
-    // 🩵 Fallback: Check IRQFLAGS2 (0x3F) for PacketSent in FSK mode
+    // Fallback: check IRQFLAGS2 for PacketSent when the DIO interrupt was missed.
     uint8_t irqFlags2 = Radio::readByte(0x3F); // REG_IRQFLAGS2
     if (irqFlags2 & 0x08) { // Bit 3 == PacketSent (TXDONE in FSK)
-        ets_printf("FSK: Detected PacketSent (TXDONE) via register (ISR missed?)\n");
+        static uint32_t lastPacketSentFallbackLogMs = 0;
+        const uint32_t nowMs = millis();
+        if (lastPacketSentFallbackLogMs == 0 || nowMs - lastPacketSentFallbackLogMs > 60000) {
+            ets_printf("FSK: PacketSent detected by register fallback; DIO interrupt may be missed\n");
+            lastPacketSentFallbackLogMs = nowMs;
+        }
         Radio::writeByte(0x3F, 0x08); // Clear PacketSent bit
         iohcRadio::txComplete = true;
     }
@@ -617,20 +652,23 @@ void iohcRadio::onTxTicker(void *arg) {
         iohcRadio::txComplete = true;
     }
 
-    // ⏳ Wait for TXDONE
+    // Wait silently while TXDONE is pending; this ticker can run many times per packet.
     if (!radio->txComplete) {
-        ets_printf("TX: Waiting for TXDONE... (state=%s)\n", radioStateToString(radio->radioState));
         return;
     }
 
-    // ✅ TXDONE received
+    // TXDONE received
     ESP_LOGD("RADIO", "TXDONE flag set, ready to send repeat or next packet.\n");
 
-    // 🔁 Repeat logic
+    // Repeat logic
     if (packet->repeat > 0) {
         packet->repeat--;
         ets_printf("TX: Repeating current packet (%d repeats left)\n", packet->repeat);
     } else {
+        // sent() transfers ownership to another task; capture RX settings first.
+        const bool wasTwoW = packet->payload.packet.header.CtrlByte1.asStruct.Protocol == 0;
+        const uint32_t responseFrequency = packet->frequency;
+        const uint32_t responseWindowMs = packet->payload.packet.header.cmd == 0x28 ? 2000 : 500;
         // inform callback we finished sending this packet, this transfers ownership of the packet to the callback queue
         radio->sent(packet);
 
@@ -644,11 +682,22 @@ void iohcRadio::onTxTicker(void *arg) {
             radio->Sender.detach();
             radio->packets2send.clear();
             radio->currentBatchHas2W = false;
-            radio->txBatchActive = false;
             const unsigned long nowMs = millis();
             const bool resumePairingScan = radio->resumeTwoWScanAfterTx &&
                                            radio->resumeTwoWScanUntilMs > nowMs;
-            if (resumePairingScan) {
+            if (wasTwoW && resumePairingScan) {
+                // The 2W profile is already active. Do not reset the FIFO or hop away after TX.
+                for (uint8_t i = 0; i < radio->configuredNumFreqs; ++i) {
+                    if (radio->scan_freqs[i] == responseFrequency) radio->currentFreqIdx = i;
+                }
+                radio->twoWResponseUntilMs = nowMs + responseWindowMs;
+                radio->tickCounter = 0;
+                radio->preCounter = 0;
+                Radio::clearFlags();
+                radio->setRadioState(RadioState::RX);
+                radio->txBatchActive = false;
+                Radio::setRx();
+            } else if (resumePairingScan) {
                 const uint32_t remainingMs =
                     static_cast<uint32_t>(radio->resumeTwoWScanUntilMs - nowMs);
                 radio->startTwoWScan(remainingMs, radio->resumeTwoWScanDwellUs);
@@ -663,6 +712,7 @@ void iohcRadio::onTxTicker(void *arg) {
             radio->resumeTwoWScanAfterTx = false;
             radio->resumeTwoWScanUntilMs = 0;
             radio->resumeTwoWScanWindowMs = 0;
+            radio->txBatchActive = false;
             radio->startQueuedSend();
             return;
         }
@@ -678,6 +728,7 @@ void iohcRadio::onTxTicker(void *arg) {
 
     radio->setRadioState(RadioState::TX); // Stay TX until done
     Radio::setStandby();
+    Radio::setPreambleLength(transmitPreambleBytes(packet));
     if (packet->frequency != 0) {
         Radio::setCarrier(Radio::Carrier::Frequency, packet->frequency);
     }
@@ -687,7 +738,7 @@ void iohcRadio::onTxTicker(void *arg) {
     radio->txStartedAtUs = esp_timer_get_time();
     //packetStamp = esp_timer_get_time();
     //packet->decode(true); //false);
-    //IOHC::lastSendCmd = packet->payload.packet.header.cmd;
+    IOHC::lastSendCmd.store(packet->payload.packet.header.cmd);
 
     ets_printf("TX: Sent packet %d/%d at %llu us\n",
                radio->txCounter + 1,

@@ -18,6 +18,7 @@ void updateTwoWTxStatus(const String &command, const String &result, bool isErro
 void updateTwoWRxStatus(const String &packetType, const String &from,
                         const String &to, const String &cmd,
                         const String &data, const String &frequency = "");
+void updateTwoWSurveyResult(uint8_t command, int answer);
 #else
 inline void setupWebServer() {}
 inline void loopWebServer() {}
@@ -25,6 +26,7 @@ inline void broadcastDeviceAction(const String &, const String &, int, int, cons
 inline void updateTwoWTxStatus(const String &, const String &, bool = false) {}
 inline void updateTwoWRxStatus(const String &, const String &, const String &,
                                const String &, const String &, const String & = "") {}
+inline void updateTwoWSurveyResult(uint8_t, int) {}
 #endif
 
 #endif // WEB_SERVER_HANDLER_H

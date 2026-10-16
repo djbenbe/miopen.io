@@ -5,8 +5,37 @@
         });
     }
 
+    function withTimeout(options, timeoutMs) {
+        const requestOptions = Object.assign({}, options || {});
+        const timeout = timeoutMs || 12000;
+        if (typeof AbortController === "undefined") {
+            return { options: requestOptions, cancel: function () {} };
+        }
+
+        const controller = new AbortController();
+        const previousSignal = requestOptions.signal;
+        const timer = setTimeout(function () {
+            controller.abort();
+        }, timeout);
+
+        if (previousSignal) {
+            previousSignal.addEventListener("abort", function () {
+                controller.abort();
+            });
+        }
+
+        requestOptions.signal = controller.signal;
+        return {
+            options: requestOptions,
+            cancel: function () {
+                clearTimeout(timer);
+            }
+        };
+    }
+
     async function requestJson(url, options) {
-        const requestOptions = options || {};
+        const timeoutRequest = withTimeout(options);
+        const requestOptions = timeoutRequest.options;
         const method = (requestOptions.method || "GET").toUpperCase();
         const requestUrl = method === "GET"
             ? url + (url.indexOf("?") === -1 ? "?" : "&") + "_=" + Date.now()
@@ -20,7 +49,12 @@
         try {
             response = await fetch(requestUrl, requestOptions);
         } catch (error) {
+            if (error && error.name === "AbortError") {
+                throw new Error("ESP antwoordt niet binnen 12 seconden. Controleer WiFi of herstart het toestel.");
+            }
             throw new Error("ESP niet bereikbaar. Controleer of het toestel online is of net herstart.");
+        } finally {
+            timeoutRequest.cancel();
         }
         const data = await ensureJson(response);
         if (!response.ok) {
@@ -47,9 +81,20 @@
     }
 
     async function downloadFile(url, filename) {
-        const response = await fetch(url);
-        if (!response.ok) {
-            throw new Error("Network response was not ok");
+        const timeoutRequest = withTimeout({}, 12000);
+        let response;
+        try {
+            response = await fetch(url, timeoutRequest.options);
+            if (!response.ok) {
+                throw new Error("Network response was not ok");
+            }
+        } catch (error) {
+            if (error && error.name === "AbortError") {
+                throw new Error("ESP antwoordt niet binnen 12 seconden. Controleer WiFi of herstart het toestel.");
+            }
+            throw error;
+        } finally {
+            timeoutRequest.cancel();
         }
 
         const blob = await response.blob();

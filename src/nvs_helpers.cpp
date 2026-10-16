@@ -39,6 +39,11 @@ void nvs_write_string(const char *key, const std::string &value) {
     prefs.putString(key, value.c_str());
 }
 
+bool nvs_write_string_checked(const char *key, const std::string &value) {
+    if (!nvs_init() || value.empty()) return false;
+    return prefs.putString(key, value.c_str()) == value.size();
+}
+
 bool nvs_read_u16(const char *key, uint16_t &value) {
     if (!nvs_init()) return false;
     if (!prefs.isKey(key)) return false;

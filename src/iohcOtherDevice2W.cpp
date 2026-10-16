@@ -227,8 +227,8 @@ namespace IOHC {
                     memcpy(packet->payload.packet.header.source, gateway, 3);
                     memcpy(packet->payload.packet.header.target, broadcast, 3);
 
-                    packet->repeat = 3;
-                    packet->repeatTime = 75;
+                    packet->repeat = 0;
+                    packet->repeatTime = 1;
                 }
                 digitalWrite(RX_LED, digitalRead(RX_LED) ^ 1);
                 _radioInstance->send(packets2send);
@@ -373,6 +373,8 @@ namespace IOHC {
                     0x17, 0x18, 0x19, 0x20, 0x21
                 };
                 uint8_t specacei[] = {0x01, 0xe7, 0x00, 0x00, 0x00, 0x00};
+                // Payload used by the reference scanner for GET_NAME-like commands.
+                std::vector<uint8_t> myName = {0x4d, 0x59, 0x5f, 0x47, 0x41, 0x54, 0x45, 0x57, 0x41, 0x59};
                 // address broadcast;
                 // const char* dat = data->at(1).c_str();
                 // hexStringToBytes(dat, broadcast);
@@ -383,12 +385,13 @@ namespace IOHC {
                 address to_2 = {0x9a, 0x50, 0x65};
                 address to_3 = {0x31, 0x58, 0x24};
                 //{0x47, 0x77, 0x06}, {0x48, 0x79, 0x02}, {0x8C, 0xCB, 0x30}, {0x8C, 0xCB, 0x31}
-                address broad = {0x00, 0x0d, 0x3b}; //{0x00, 0xFF, 0xFB}; //
+                address broadcast3b = {0x00, 0x00, 0x3b};
+                address broadcast3f = {0x00, 0x00, 0x3f};
 
                 uint8_t counter = 0;
                 std::vector<iohcPacket *> packets2send;
                 for (const auto &command: mapValid) {
-                    if (command.second == 0 || (command.second == 5 && command.first != 0x19)) {
+                    if (command.second == 0xFF || (command.second == 5 && command.first != 0x19)) {
                         counter++;
 
                         // 0x00,  0x01, 0x03, 0x0a, 0x0c, 0x19, 0x1e, 0x20, 0x23, 0x28, 0x2a(12), 0x2c, 0x2e, 0x31, 0x32(16), 0x36, 0x38(6), 0x39, 0x3c(6), 0x46(9), 0x48(9), 0x4a(18), 0x4b
@@ -413,9 +416,13 @@ namespace IOHC {
                             toSend.assign(special12, special12 + 2);
                         if (command.first == 0x2A || command.first == 0x96)
                             toSend.assign(special12, special12 + 12);
-                        if (command.first == 0x38 || command.first == 0x3C || command.first == 0x3D)
+                        if (command.first == 0x38 || command.first == 0x3D)
                             toSend.assign(special12, special12 + 6);
-                        if (command.first == 0x32 || command.first == 0x52 || command.first == 0x92)
+                        if (command.first == 0x3C)
+                            toSend = {0xab, 0xba, 0xab, 0xba, 0xab, 0xba};
+                        if (command.first == 0x52)
+                            toSend = myName;
+                        if (command.first == 0x32 || command.first == 0x92)
                             toSend.assign(special12, special12 + 16);
                         if (command.first == 0x46 || command.first == 0x48 || command.first == 0x6E || command.first == 0x6F)
                             toSend.assign(special12, special12 + 9);
@@ -424,27 +431,23 @@ namespace IOHC {
                         if (command.first == 0x60 || command.first == 0x82)
                             toSend.assign(special12, special12 + 21);
 
-                        auto *packet = new iohcPacket;
-                        packets2send.push_back(packet);
-                        forgePacket(packet, toSend);
-                        packet->payload.packet.header.cmd = command.first;
-                        memorizeOther2W.memorizedCmd = packet->payload.packet.header.cmd;
+                        for (const auto *target : {broadcast3b, broadcast3f}) {
+                            auto *packet = new iohcPacket;
+                            packets2send.push_back(packet);
+                            forgePacket(packet, toSend);
+                            packet->payload.packet.header.cmd = command.first;
+                            memorizeOther2W.memorizedCmd = packet->payload.packet.header.cmd;
 
-                        packet->payload.packet.header.CtrlByte1.asStruct.StartFrame = 1;
-                        packet->payload.packet.header.CtrlByte1.asStruct.EndFrame = 0;
-                        packet->payload.packet.header.CtrlByte2.asStruct.LPM = 1;
-                        packet->payload.packet.header.CtrlByte2.asStruct.Prio = 1;
+                            packet->payload.packet.header.CtrlByte1.asStruct.StartFrame = 1;
+                            packet->payload.packet.header.CtrlByte1.asStruct.EndFrame = 0;
+                            packet->payload.packet.header.CtrlByte2.asStruct.Prio = 1;
 
-                        memcpy(packet->payload.packet.header.source, gateway/*from*//*gateway*/, 3);
-                        // if (command.first == 0x14 || command.first == 0x19 || command.first == 0x1e || command.first == 0x2a || command.first == 0x34 || command.first == 0x4a) {
-                        // memcpy(packet->payload.packet.header.target, broad, 3);
-                        // } else {
-                        memcpy(packet->payload.packet.header.target, master_to, 3);
-                        // }
+                            memcpy(packet->payload.packet.header.source, gateway, 3);
+                            memcpy(packet->payload.packet.header.target, target, 3);
 
-                        //packet->delayed = 245;
-                        packet->repeatTime = 250; // Slow down discover loop
-                        packet->delayed = 250;   // Give enough time for the answer
+                            packet->repeatTime = 250; // Slow down survey loop
+                            packet->delayed = 250;   // Give enough time for the answer
+                        }
                     }
                     toSend.clear();
                 }
@@ -470,17 +473,17 @@ namespace IOHC {
         std::iota(valid.begin(), valid.end(), 0);
 
         valid = {
-            0x00, 0x01, 0x03, 0x0a, 0x0c, 0x19, 0x1e, 0x20, 0x23, 0x28, 0x2a, 0x2c, 0x2e, 0x31, 0x32, 0x36, 0x38, 0x39,
-            0x3c, 0x46, 0x48, 0x4a, 0x4b,
+            0x00, 0x01, 0x03, 0x0a, 0x0c, 0x19, 0x1e, 0x20, 0x23, 0x28, 0x2a, 0x2c, 0x38, 0x2e, 0x31, 0x36, 0x39,
+            0x46, 0x48, 0x4a, 0x4b,
             0x50, 0x52, 0x54, 0x56, 0x60, 0x64, 0x6e, 0x6f, 0x71, 0x73, 0x80, 0x82, 0x84, 0x86, 0x88, 0x8a, 0x8b, 0x8e,
             0x90, 0x92, 0x94, 0x96, 0x98,
             //Not in firmware 02 0e 25 30 34 3a 3d 58
-            0x02, 0x0b, 0x0e, 0x14, 0x16, 0x25, 0x30, 0x34, 0x3a, 0x3d, 0x58
+            0x02, 0x0b, 0x0e, 0x14, 0x16, 0x25, 0x30, 0x34, 0x3a, 0x58, 0x3c
         };
 
         for (int key: valid) {
             // validKey++;
-            mapValid[key] = 0;
+            mapValid[key] = 0xFF;
         }
         // printf("ValidKey: %d\n", validKey);
         // printf("MapValid size: %zu\n", mapValid.size());
@@ -532,8 +535,11 @@ namespace IOHC {
 
         fs::File f = LittleFS.open(OTHER_2W_FILE, "r", true);
         JsonDocument doc;
-        deserializeJson(doc, f);
+        const auto error = deserializeJson(doc, f);
         f.close();
+        if (error) return false;
+        memset(_node, 0, sizeof(_node));
+        memset(_dst, 0, sizeof(_dst));
 
         // Iterate through the JSON object
         for (JsonPair kv: doc.as<JsonObject>()) {

@@ -21,8 +21,22 @@ namespace {
     RTC_NOINIT_ATTR uint32_t crashMarkerMagic;
     constexpr uint32_t CRASH_MARKER_MAGIC = 0x4d494f50; // MIOP
 
+    bool isNoisyLog(const String &msg) {
+        return msg.startsWith("[D]") ||
+               msg.startsWith("[V]") ||
+               msg.indexOf("TX: TX-RX DONE") >= 0 ||
+               msg.indexOf("TX: Waiting for TXDONE") >= 0 ||
+               msg.indexOf("State:") >= 0 ||
+               msg.indexOf("2W scan listening") >= 0 ||
+               msg.indexOf("2W scan diag") >= 0;
+    }
+
+    bool shouldStoreLog(const String &msg) {
+        return msg.length() > 0 && !isNoisyLog(msg);
+    }
+
     bool shouldBroadcastLog(const String &msg) {
-        if (msg.length() == 0) {
+        if (!shouldStoreLog(msg)) {
             return false;
         }
 
@@ -32,15 +46,6 @@ namespace {
             msg.indexOf("Boot reset reason") >= 0 ||
             msg.indexOf("Last crash marker") >= 0) {
             return true;
-        }
-
-        if (msg.startsWith("[D]") || msg.startsWith("[V]")) {
-            return false;
-        }
-
-        if (msg.indexOf("TX: TX-RX DONE") >= 0 ||
-            msg.indexOf("State:") >= 0) {
-            return false;
         }
 
         static unsigned long lastBroadcastMs = 0;
@@ -65,7 +70,8 @@ void addLogMessage(const String &msg) {
     const unsigned long now = millis();
     const char *text = msg.c_str();
 
-    if (strncmp(text, lastMessage, MAX_LOG_ENTRY_LEN) == 0 && now - lastMessageMs < 3000) {
+    if (!shouldStoreLog(msg) ||
+        (strncmp(text, lastMessage, MAX_LOG_ENTRY_LEN) == 0 && now - lastMessageMs < 3000)) {
         inLogMessage = false;
         return;
     }
@@ -84,7 +90,9 @@ void addLogMessage(const String &msg) {
     const String storedMessage(logRing[slot]);
     Serial.printf("[%10lu ms] %s\n", now, storedMessage.c_str());
 #if defined(WEBSERVER)
-    broadcastLog(storedMessage);
+    if (shouldBroadcastLog(storedMessage)) {
+        broadcastLog(storedMessage);
+    }
 #endif
 #if defined(SYSLOG)
     sendSyslog(storedMessage);

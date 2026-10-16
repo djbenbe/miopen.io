@@ -56,6 +56,7 @@ function getLang() {
   await setLang(lang);
 })();
 
+window.applyI18n = applyI18n;
 window.t = t;
 window.setLang = setLang;
 window.getLang = getLang;

@@ -85,8 +85,10 @@ namespace Cmd {
 extern std::atomic<bool> verbosity;
 extern std::atomic<bool> pairMode;
 extern std::atomic<bool> pairAltMode;
+extern std::atomic<bool> pairKeyMode;
 extern std::atomic<bool> scanMode;
 void extendTwoWPairingWindow(uint32_t windowMs);
+uint32_t twoWPairingRemainingMs();
 
 #if defined(ESP32)
   extern TimersUS::TickerUsESP32 kbd_tick;

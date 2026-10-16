@@ -37,9 +37,6 @@
 #define SPI_Write   0x80
 #define SPI_Read    0x00
 
-#define TxReady  {while (!(readByte(REG_IRQFLAGS1) & RF_IRQFLAGS1_TXREADY));}   // Check for TxReady flag
-#define RxReady  {while (!(readByte(REG_IRQFLAGS1) & RF_IRQFLAGS1_PLLLOCK));}   // Check for PllLock flag; do not use with sequencer
-
 #define RF_PACKETCONFIG2_IOHOME_POWERFRAME  0x10    // Missing from SX1276 FSK modem registers and bits definitions
 
 /*
@@ -75,6 +72,8 @@ namespace Radio {
 
     void initHardware();
     void initRegisters(uint8_t maxPayloadLength);
+    void applyDefaultRadioProfile();
+    void applyTwoWHomeControlProfile();
     void calibrate();
     void setStandby();
     void setTx();

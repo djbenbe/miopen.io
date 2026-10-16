@@ -17,6 +17,8 @@
 #include <iohcSystemTable.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <backup_format.h>
+#include <crypto2Wutils.h>
 
 #include <utility>
 
@@ -35,9 +37,10 @@ namespace IOHC {
         changed = true;
         std::string s0 = bytesToHexString(node, 3);
         auto *tmp = new iohcObject (node, backbone, actuator, manufacturer, flags);
-        bool inserted = _objects.insert_or_assign(s0, tmp).second;
-        this->save();
-        return inserted;
+        auto it = _objects.find(s0);
+        if (it != _objects.end()) delete it->second;
+        _objects.insert_or_assign(s0, tmp);
+        return this->save();
     }
 
     bool iohcSystemTable::addObject(iohcObject *obj) {
@@ -84,7 +87,6 @@ namespace IOHC {
     }
 
     bool iohcSystemTable::load()  {
-        this->empty();
         if (LittleFS.exists(IOHC_SYS_TABLE))
             Serial.printf("Loading systable objects from %s\n", IOHC_SYS_TABLE);
         else  {
@@ -103,13 +105,15 @@ namespace IOHC {
             return false;
         }
 
-        // Iterate through the JSON object
+        clear();
+        // Loading must not append or rewrite the file being restored.
         for (JsonPair kv : doc.as<JsonObject>())  {
             const char* key = kv.key().c_str();
             auto obj = kv.value().as<JsonObject>();
-            for (JsonPair ov : obj)
-                addObject(key, ov.value().as<std::string>());
+            if (obj["values"].is<std::string>())
+                _objects.emplace(key, new iohcObject(obj["values"].as<std::string>()));
         }
+        changed = false;
         return true;
     }
 
@@ -117,7 +121,9 @@ namespace IOHC {
         if (!changed && force == false)
             return false;
 
-        fs::File f = LittleFS.open(IOHC_SYS_TABLE, "a+");
+        const char *temporaryPath = IOHC_SYS_TABLE ".tmp";
+        fs::File f = LittleFS.open(temporaryPath, "w");
+        if (!f) return false;
         /*Dynamic*/JsonDocument doc; //(2048);
 
         for (auto [fst, snd] : _objects) {
@@ -125,10 +131,52 @@ namespace IOHC {
 
             jobj["values"] = snd->serialize();
         }
-        serializeJson(doc, f);
+        const size_t expected = measureJson(doc);
+        const size_t written = serializeJson(doc, f);
+        f.flush();
         f.close();
+        if (written != expected || !LittleFS.rename(temporaryPath, IOHC_SYS_TABLE)) return false;
         changed = false;
 
+        return true;
+    }
+
+    bool iohcSystemTable::savePairing(const address controller) {
+        JsonDocument doc;
+        doc["format"] = "miopen-2w-backup";
+        doc["version"] = 1;
+        auto twoW = doc["twoW"].to<JsonObject>();
+        twoW["controller"] = bytesToHexString(controller, 3);
+        twoW["systemKey"] = bytesToHexString(system_key, sizeof(system_key));
+        auto devices = twoW["devices"].to<JsonObject>();
+        for (const auto &entry : _objects) devices[entry.first]["values"] = entry.second->serialize();
+        if (doc.overflowed()) return false;
+        const char *temporaryPath = IOHC_2W_PAIRING_FILE ".tmp";
+        fs::File file = LittleFS.open(temporaryPath, "w");
+        if (!file) return false;
+        const size_t written = serializeJson(doc, file);
+        file.flush();
+        file.close();
+        if (written == measureJson(doc) && LittleFS.rename(temporaryPath, IOHC_2W_PAIRING_FILE)) return true;
+        LittleFS.remove(temporaryPath);
+        return false;
+    }
+
+    bool iohcSystemTable::loadPairing(const address controller) {
+        fs::File file = LittleFS.open(IOHC_2W_PAIRING_FILE, "r");
+        if (!file) return false;
+        JsonDocument doc;
+        const auto error = deserializeJson(doc, file);
+        file.close();
+        const std::string controllerId = bytesToHexString(controller, 3);
+        if (error || !BackupFormat::isTwoWOnly(doc.as<JsonVariantConst>()) ||
+            !BackupFormat::valid(doc.as<JsonVariantConst>(), controllerId.c_str())) return false;
+        clear();
+        for (JsonPair entry : doc["twoW"]["devices"].as<JsonObject>()) {
+            _objects.emplace(entry.key().c_str(), new iohcObject(entry.value()["values"].as<std::string>()));
+        }
+        hexStringToBytes(doc["twoW"]["systemKey"].as<std::string>(), system_key);
+        changed = false;
         return true;
     }
 

@@ -16,8 +16,14 @@
 
     async function fetchAndDisplayRemotes(app) {
         const tbody = document.querySelector("#remote-table tbody");
+        if (!tbody) {
+            return [];
+        }
 
         try {
+            if (!app.state.devicesCache.length && typeof app.fetchAndDisplayDevices === "function") {
+                await app.fetchAndDisplayDevices();
+            }
             const remotes = await window.MiOpenApi.requestJson("/api/remotes");
             tbody.textContent = "";
 
@@ -146,19 +152,17 @@
                 btnShowDelete: false,
                 btnShowCancel: false,
                 timingLabel: app.i18nText("popup.remote_name_label", "Remote Name:"),
-                defaultValue: app.elements.lastAddrInput.value.trim(),
+                defaultValue: app.elements.lastAddrInput ? app.elements.lastAddrInput.value.trim() : "",
                 onSave: async function (addr, newName) {
-                    const id = addr.trim();
-                    if (!id) {
-                        return;
-                    }
-                    if (!newName.trim()) {
+                    const id = (addr || "").trim();
+                    const name = (newName || "").trim();
+                    if (!id || !name) {
                         return;
                     }
 
                     try {
                         const result = await window.MiOpenApi.postJson("/api/command", {
-                            command: "newRemote " + id + " " + newName
+                            command: "newRemote " + id + " " + name
                         });
                         await fetchAndDisplayRemotes(app);
                     } catch (error) {

@@ -25,6 +25,7 @@
 #include <nvs_helpers.h>
 #include <cmath>
 #include <algorithm>
+#include <freertos/semphr.h>
 #if defined(MQTT)
 #include <mqtt_handler.h>
 #endif
@@ -35,7 +36,27 @@
 namespace IOHC {
     iohcRemote1W* iohcRemote1W::_iohcRemote1W = nullptr;
     static constexpr uint32_t DEFAULT_TRAVEL_TIME_SEC = 10;
+    // Serializes save() against itself: command handlers and the position
+    // tracker task can both save /1W.json. Without this, overlapping writes can
+    // race on the same temporary file and corrupt or fail the rename.
+    static SemaphoreHandle_t saveMutex = xSemaphoreCreateMutex();
 
+    class MutexGuard {
+    public:
+        explicit MutexGuard(SemaphoreHandle_t m) : mutex(m) { xSemaphoreTake(mutex, portMAX_DELAY); }
+        ~MutexGuard() { xSemaphoreGive(mutex); }
+        MutexGuard(const MutexGuard &) = delete;
+        MutexGuard &operator=(const MutexGuard &) = delete;
+    private:
+        SemaphoreHandle_t mutex;
+    };
+
+
+    static void removeIfExists(const char *path) {
+        if (path && LittleFS.exists(path)) {
+            LittleFS.remove(path);
+        }
+    }
     static void broadcastWebDeviceAction(const iohcRemote1W::remote &r, const char *action) {
 #if defined(WEBSERVER)
         const std::string id = bytesToHexString(r.node, sizeof(r.node));
@@ -644,6 +665,14 @@ Every 9 -> 0x20 12:41:28.171 > (23) 1W S 1 E 1  FROM B60D1A TO 00003F CMD 20 <  
                     //     packet->payload.packet.msg.p0x00_all.hmac[i] = hmac[i];
                     // }
                     packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
+                    // 1W has no acknowledgement. When enabled, send extra bursts to
+                    // improve reliability for devices that sometimes miss a command.
+                    if (r.repeatOnNoResponse) {
+                        packet->repeat = 8;
+                        packet->repeatTime = 40;
+                        Serial.printf("1W repeatOnNoResponse active for %s: repeats=%u\n",
+                                      r.name.c_str(), packet->repeat);
+                    }
 
                     digitalWrite(RX_LED, digitalRead(RX_LED) ^ 1);
 
@@ -808,6 +837,7 @@ Every 9 -> 0x20 12:41:28.171 > (23) 1W S 1 E 1  FROM B60D1A TO 00003F CMD 20 <  
         return true;
     }
    bool iohcRemote1W::save() {
+        MutexGuard guard(saveMutex);
         if (remotes.empty()) {
             Serial.printf("Refusing to save empty 1W remote list to %s\n", IOHC_1W_REMOTE);
             return false;
@@ -815,7 +845,7 @@ Every 9 -> 0x20 12:41:28.171 > (23) 1W S 1 E 1  FROM B60D1A TO 00003F CMD 20 <  
 
         constexpr const char *tempFile = "/1W.json.tmp";
         constexpr const char *backupFile = "/1W.json.bak";
-        LittleFS.remove(tempFile);
+        removeIfExists(tempFile);
         fs::File f = LittleFS.open(tempFile, "w");
         if (!f) {
             Serial.printf("Failed to open temporary 1W settings file %s\n", tempFile);
@@ -859,27 +889,27 @@ Every 9 -> 0x20 12:41:28.171 > (23) 1W S 1 E 1  FROM B60D1A TO 00003F CMD 20 <  
         f.flush();
         f.close();
         if (written == 0) {
-            LittleFS.remove(tempFile);
+            removeIfExists(tempFile);
             Serial.println("Failed to serialize 1W settings");
             return false;
         }
 
-        LittleFS.remove(backupFile);
+        removeIfExists(backupFile);
         if (LittleFS.exists(IOHC_1W_REMOTE) &&
             !LittleFS.rename(IOHC_1W_REMOTE, backupFile)) {
-            LittleFS.remove(tempFile);
+            removeIfExists(tempFile);
             Serial.println("Failed to back up 1W settings file");
             return false;
         }
         if (!LittleFS.rename(tempFile, IOHC_1W_REMOTE)) {
             Serial.println("Failed to replace 1W settings file");
-            LittleFS.remove(tempFile);
+            removeIfExists(tempFile);
             if (LittleFS.exists(backupFile)) {
                 LittleFS.rename(backupFile, IOHC_1W_REMOTE);
             }
             return false;
         }
-        LittleFS.remove(backupFile);
+        removeIfExists(backupFile);
 
         return true;
     }

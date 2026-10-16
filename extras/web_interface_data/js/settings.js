@@ -1,7 +1,7 @@
 (function () {
-    function setSettingsStatus(app, message, isError) {
+    function setSettingsStatus(app, message, isError, timeoutMs) {
         if (typeof window.showToast === "function") {
-            window.showToast(message, isError);
+            window.showToast(message, isError, timeoutMs);
         }
     }
 
@@ -12,6 +12,79 @@
     }
 
 
+
+    function getGitHubUpdateStatusElement() {
+        return document.getElementById("github-update-status");
+    }
+
+    function setGitHubUpdateStatus(message, isError) {
+        const status = getGitHubUpdateStatusElement();
+        if (status) {
+            status.textContent = message;
+            status.classList.toggle("error", !!isError);
+        }
+        if (typeof window.showToast === "function") {
+            window.showToast(message, !!isError, 12000);
+        }
+    }
+
+    function shortCommitFromVersion(version) {
+        const match = String(version || "").match(/g([0-9a-f]{7,})/i);
+        return match ? match[1].toLowerCase() : "";
+    }
+
+    function normaliseReleaseBranch(branch) {
+        const value = String(branch || "").trim();
+        if (value === "master" || value === "dev-main" || value === "Beta") {
+            return value;
+        }
+        if (value.toLowerCase().indexOf("beta") !== -1) {
+            return "Beta";
+        }
+        return "Beta";
+    }
+
+    async function checkGithubUpdate(app) {
+        const branchSelect = document.getElementById("github-update-branch");
+        setGitHubUpdateStatus("Checking GitHub update...", false);
+        try {
+            const info = await window.MiOpenApi.requestJson("/api/info");
+            const selectedBranch = branchSelect ? branchSelect.value : "auto";
+            const branch = selectedBranch === "auto" ? (info.branch || "Beta") : selectedBranch;
+            const board = info.board || "";
+            const response = await fetch("https://api.github.com/repos/djbenbe/miopen.io/releases/tags/" + encodeURIComponent(branch + "-latest"), {
+                headers: { "Accept": "application/vnd.github+json" }
+            });
+            if (!response.ok) {
+                throw new Error("GitHub HTTP " + response.status + " for " + branch + "-latest");
+            }
+            const release = await response.json();
+            const assets = Array.isArray(release.assets) ? release.assets : [];
+            const boardAssets = board ? assets.filter(function (asset) {
+                return asset.name.indexOf(board) === 0;
+            }) : assets;
+            const currentShort = shortCommitFromVersion(info.version);
+            const releaseCommit = String(release.target_commitish || "").toLowerCase();
+            const sameCommit = currentShort && releaseCommit.indexOf(currentShort) === 0;
+            const assetText = boardAssets.length ? boardAssets.length + " asset(s) for " + board : "no matching board assets";
+            const updateText = sameCommit ? "Already on latest " : "Update available: ";
+            setGitHubUpdateStatus(updateText + release.tag_name + " (" + assetText + ")", !boardAssets.length);
+        } catch (error) {
+            setGitHubUpdateStatus("GitHub update check failed: " + (error.message || error), true);
+        }
+    }
+    function toggleMqttPasswordVisibility(app) {
+        const input = app.elements.mqttPasswordInput;
+        const button = app.elements.mqttPasswordToggle;
+        if (!input || !button) {
+            return;
+        }
+        const visible = input.type === "password";
+        input.type = visible ? "text" : "password";
+        button.classList.toggle("visible", visible);
+        button.setAttribute("aria-label", visible ? "Hide password" : "Show password");
+        button.setAttribute("title", visible ? "Hide password" : "Show password");
+    }
     function setDisplayStatus(app, message, isError) {
         if (!app.elements.displayStatus) {
             return;
@@ -41,6 +114,9 @@
             app.elements.mqttPasswordInput.value = config.password || "";
             app.elements.mqttPortInput.value = config.port || "";
             app.elements.mqttDiscoveryInput.value = config.discovery || "";
+            if (app.elements.mqttAllowAnonymousInput) {
+                app.elements.mqttAllowAnonymousInput.checked = !!config.allowAnonymous;
+            }
         } catch (error) {
             console.error("Error fetching MQTT config", error);
         }
@@ -57,7 +133,8 @@
                 server: app.elements.mqttServerInput.value,
                 password: app.elements.mqttPasswordInput.value,
                 port: app.elements.mqttPortInput.value,
-                discovery: app.elements.mqttDiscoveryInput.value
+                discovery: app.elements.mqttDiscoveryInput.value,
+                allowAnonymous: !!(app.elements.mqttAllowAnonymousInput && app.elements.mqttAllowAnonymousInput.checked)
             });
             setSettingsStatus(
                 app,
@@ -123,6 +200,9 @@
             app.elements.networkDns1Input.value = config.dns1 || "";
             app.elements.networkDns2Input.value = config.dns2 || "";
             app.elements.networkSntpInput.value = config.sntp || "";
+            if (app.elements.networkTzInput) {
+                app.elements.networkTzInput.value = config.tz || "CET-1CEST,M3.5.0,M10.5.0/3";
+            }
             setNetworkStatus(app, config.connected ? "Network config loaded" : "Network config loaded, WiFi not connected", !config.connected);
         } catch (error) {
             console.error("Error fetching network config", error);
@@ -144,7 +224,8 @@
                 gateway: app.elements.networkGatewayInput.value,
                 dns1: app.elements.networkDns1Input.value,
                 dns2: app.elements.networkDns2Input.value,
-                sntp: app.elements.networkSntpInput.value
+                sntp: app.elements.networkSntpInput.value,
+                tz: app.elements.networkTzInput ? app.elements.networkTzInput.value : ""
             });
             setNetworkStatus(app, result.message || "Network config saved, rebooting");
             setSettingsStatus(app, result.message || "Network config saved, rebooting");
@@ -425,8 +506,10 @@
             app.elements.syslogServerInput.value = result.server || "";
             app.elements.syslogPortInput.value = result.port || "";
             app.elements.syslogTagInput.value = result.tag || "";
+            setSettingsStatus(app, result.message || app.i18nText("status.syslog_saved", "Syslog settings saved"), false, 12000);
         } catch (error) {
             console.error("Error updating syslog config", error);
+            setSettingsStatus(app, error.message || app.i18nText("status.syslog_save_error", "Saving syslog settings failed"), true, 12000);
         } finally {
             syslogUpdateInFlight = false;
             if (app.elements.syslogUpdateButton) {
@@ -441,11 +524,14 @@
         if (app.elements.syslogTestButton) app.elements.syslogTestButton.disabled = true;
         try {
             const result = await window.MiOpenApi.postJson("/api/syslog/test", {});
-            if (result.success) {
+            if (result.success !== false) {
+                setSettingsStatus(app, result.message || app.i18nText("status.syslog_test_sent", "Syslog test sent"), false, 12000);
             } else {
+                setSettingsStatus(app, result.message || app.i18nText("status.syslog_test_failed", "Syslog test failed"), true, 12000);
             }
         } catch (error) {
             console.error("Error sending syslog test", error);
+            setSettingsStatus(app, error.message || app.i18nText("status.syslog_test_failed", "Syslog test failed"), true, 12000);
         } finally {
             syslogTestInFlight = false;
             if (app.elements.syslogTestButton) app.elements.syslogTestButton.disabled = false;
@@ -455,6 +541,48 @@
     function normaliseIoKey(value) {
         return (value || "").replace(/[^0-9a-fA-F]/g, "").toLowerCase();
     }
+    function uploadFileWithProgress(file, url, onProgress) {
+        return new Promise(function (resolve, reject) {
+            const xhr = new XMLHttpRequest();
+            const formData = new FormData();
+            formData.append("file", file);
+            xhr.timeout = 300000;
+
+            xhr.upload.addEventListener("progress", function (event) {
+                if (event.lengthComputable && onProgress) {
+                    const percent = Math.round((event.loaded / event.total) * 100);
+                    onProgress(percent);
+                }
+            });
+
+            xhr.addEventListener("load", function () {
+                let result = {};
+                try {
+                    result = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+                } catch (_error) {
+                    result = {};
+                }
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve(result);
+                } else {
+                    reject(new Error(result.message || ("HTTP error " + xhr.status)));
+                }
+            });
+            xhr.addEventListener("error", function () {
+                reject(new Error("Upload connection failed before device confirmation"));
+            });
+            xhr.addEventListener("abort", function () {
+                reject(new Error("Upload cancelled"));
+            });
+            xhr.addEventListener("timeout", function () {
+                reject(new Error("Upload timed out before device confirmation"));
+            });
+
+            xhr.open("POST", url);
+            xhr.send(formData);
+        });
+    }
+
     async function uploadSelectedFile(app, input, url, missingMessage, successMessage, refreshFn) {
         const file = input.files[0];
         if (!file) {
@@ -463,15 +591,19 @@
         }
 
         try {
-            const result = await window.MiOpenApi.uploadFile(url, file);
+            setSettingsStatus(app, "Upload started...", false, 20000);
+            const result = await uploadFileWithProgress(file, url, function (percent) {
+                const message = percent >= 100 ? "Upload sent to device, writing flash..." : "Uploading " + percent + "%...";
+                setSettingsStatus(app, message, false, 20000);
+            });
             const message = result.message || successMessage;
-            setSettingsStatus(app, message);
+            setSettingsStatus(app, message, false, 20000);
             if (refreshFn) {
                 await refreshFn();
             }
         } catch (error) {
             const message = error.message || successMessage;
-            setSettingsStatus(app, message, true);
+            setSettingsStatus(app, message, true, 20000);
         }
     }
 
@@ -480,19 +612,30 @@
         const panels = Array.from(document.querySelectorAll("[data-settings-panel]"));
 
         function activate(name) {
+            const exists = tabs.some(function (tab) {
+                return tab.dataset.settingsTab === name;
+            });
+            const activeName = exists ? name : "integration";
             tabs.forEach(function (tab) {
-                tab.classList.toggle("active", tab.dataset.settingsTab === name);
+                tab.classList.toggle("active", tab.dataset.settingsTab === activeName);
             });
             panels.forEach(function (panel) {
-                const isActive = panel.dataset.settingsPanel === name;
+                const isActive = panel.dataset.settingsPanel === activeName;
                 panel.classList.toggle("active", isActive);
                 panel.hidden = !isActive;
             });
+            return activeName;
         }
+
+        window.activateSettingsTab = activate;
 
         tabs.forEach(function (tab) {
             tab.addEventListener("click", function () {
-                activate(tab.dataset.settingsTab);
+                const activeName = activate(tab.dataset.settingsTab);
+                const nextHash = "#/settings/" + activeName;
+                if (window.location.hash !== nextHash) {
+                    history.pushState(null, "", nextHash);
+                }
             });
         });
 
@@ -518,14 +661,23 @@
             });
         }
 
+        const githubUpdateCheckButton = document.getElementById("github-update-check");
+        if (githubUpdateCheckButton) {
+            githubUpdateCheckButton.addEventListener("click", function () {
+                checkGithubUpdate(app);
+            });
+        }
+
         const restartButton = document.getElementById("settings-restart");
         if (restartButton) {
-            restartButton.addEventListener("click", function () {
-                setSettingsStatus(
-                    app,
-                    app.i18nText("status.restart_unavailable", "Restart is not available from this firmware build"),
-                    true
-                );
+            restartButton.addEventListener("click", async function () {
+                setSettingsStatus(app, app.i18nText("status.restart_scheduled", "Restart scheduled"), false, 20000);
+                try {
+                    const result = await window.MiOpenApi.postJson("/api/restart", {});
+                    setSettingsStatus(app, result.message || app.i18nText("status.restart_scheduled", "Restart scheduled"), false, 20000);
+                } catch (error) {
+                    setSettingsStatus(app, error.message || app.i18nText("status.restart_failed", "Restart failed"), true, 20000);
+                }
             });
         }
     }
@@ -542,6 +694,9 @@
         };
         app.updateMqttConfig = function () {
             return updateMqttConfig(app);
+        };
+        app.toggleMqttPasswordVisibility = function () {
+            return toggleMqttPasswordVisibility(app);
         };
         app.loadWifiConfig = function () {
             return loadWifiConfig(app);

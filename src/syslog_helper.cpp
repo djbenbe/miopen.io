@@ -28,8 +28,34 @@ namespace {
     IPAddress    syslogIP;
     bool         syslogReady  = false;
     bool         configLoaded = false;
+    bool         timeSyncStarted = false;
+    uint32_t     syslogBackoffUntilMs = 0;
+    uint32_t     lastSyslogSendMs = 0;
+    static constexpr time_t MIN_VALID_UNIX_TIME = 1704067200; // 2024-01-01, avoids fake boot dates.
+    static constexpr uint32_t SYSLOG_MIN_SEND_INTERVAL_MS = 250;
+    static constexpr uint32_t SYSLOG_ERROR_BACKOFF_MS = 60000;
     static const char *TAG    = "SYSLOG";
 
+
+    String configuredSntpServer() {
+        std::string sntp;
+        if (nvs_read_string(NVS_KEY_NET_SNTP, sntp) && !sntp.empty()) {
+            return String(sntp.c_str());
+        }
+        return String("pool.ntp.org");
+    }
+
+    String configuredTimezone() {
+        std::string tz;
+        if (nvs_read_string(NVS_KEY_NET_TZ, tz) && !tz.empty()) {
+            return String(tz.c_str());
+        }
+        return String("CET-1CEST,M3.5.0,M10.5.0/3");
+    }
+
+    bool hasValidSystemTime() {
+        return time(nullptr) >= MIN_VALID_UNIX_TIME;
+    }
     inline int pri(int facility, int severity) {
         if (severity < 0) severity = 6;     // default info
         if (severity > 7) severity = 7;
@@ -99,6 +125,27 @@ namespace {
     }
 }
 
+// Start SNTP once WiFi is connected. This is intentionally non-blocking: early
+// boot syslog messages still go out and are timestamped by the receiver.
+void startSyslogTimeSync() {
+    ensureConfigLoaded();
+    if (WiFi.status() != WL_CONNECTED || timeSyncStarted) {
+        return;
+    }
+
+    const String timezone = configuredTimezone();
+    setenv("TZ", timezone.c_str(), 1);
+    tzset();
+
+    const String server = configuredSntpServer();
+    configTime(0, 0, server.c_str());
+    timeSyncStarted = true;
+}
+
+bool isSyslogTimeSynced() {
+    return hasValidSystemTime();
+}
+
 // Initialize UDP + resolve syslog IP from user_config.h
 void initSyslog() {
     ensureConfigLoaded();
@@ -156,14 +203,34 @@ void sendSyslog(const String &msg, int severity) {
     const String base = currentHostIdent();
     const String ho = syslog_tag.empty() ? base : (syslog_tag.c_str() + String("-") + base);
 
-    // No timestamp — device has no NTP so Jan 1 epoch would be rejected by syslog servers.
-    // The receiver timestamps the message on arrival instead.
-    const String header = "<" + String(p) + ">" + ho + " " + SYSLOG_APP + ": ";
-    const String wire   = header + "[" SYSLOG_SECRET "] " + msg;
+#ifndef SYSLOG_RFC5424
+    const String timestamp = hasValidSystemTime() ? (rfc3164Timestamp() + " ") : "";
+#else
+    const String timestamp = hasValidSystemTime() ? (iso8601UTC() + " ") : "";
+#endif
+    const String header = "<" + String(p) + ">" + timestamp + ho + " " + SYSLOG_APP + ": ";
+    const String timeNote = hasValidSystemTime() ? "" : ("uptime_ms=" + String(millis()) + " ");
+    const String wire   = header + "[" SYSLOG_SECRET "] " + timeNote + msg;
+    const uint32_t nowMs = millis();
+    if (static_cast<int32_t>(nowMs - syslogBackoffUntilMs) < 0) {
+        return;
+    }
+    if (lastSyslogSendMs != 0 && nowMs - lastSyslogSendMs < SYSLOG_MIN_SEND_INTERVAL_MS) {
+        return;
+    }
 
-    syslogUdp.beginPacket(syslogIP, syslog_port);
-    syslogUdp.write(reinterpret_cast<const uint8_t*>(wire.c_str()), wire.length());
-    syslogUdp.endPacket();
+    if (!syslogUdp.beginPacket(syslogIP, syslog_port)) {
+        resetSyslog();
+        syslogBackoffUntilMs = nowMs + SYSLOG_ERROR_BACKOFF_MS;
+        return;
+    }
+    const size_t written = syslogUdp.write(reinterpret_cast<const uint8_t*>(wire.c_str()), wire.length());
+    if (written != wire.length() || !syslogUdp.endPacket()) {
+        resetSyslog();
+        syslogBackoffUntilMs = nowMs + SYSLOG_ERROR_BACKOFF_MS;
+        return;
+    }
+    lastSyslogSendMs = nowMs;
 }
 
 // Legacy overload without severity (defaults to info)
@@ -181,6 +248,8 @@ void resetSyslog() {
 #else  // !SYSLOG
 
 // No-op definitions so you can build without SYSLOG
+void startSyslogTimeSync() {}
+bool isSyslogTimeSynced() { return false; }
 void initSyslog() {}
 void resetSyslog() {}
 void sendSyslog(const String &) {}

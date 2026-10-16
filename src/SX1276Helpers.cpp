@@ -34,6 +34,8 @@
 
 namespace Radio {
     SPISettings SpiSettings(4000000, MSBFIRST, SPI_MODE0);
+    static bool twoWProfileActive = false;
+    static uint8_t defaultSyncByte3 = 0;
 
     // Simplified bandwidth registries evaluation
     std::map<uint8_t, regBandWidth> __bw =
@@ -45,6 +47,30 @@ namespace Radio {
         {200, {0x01, 0x01}},
         {250, {0x00, 0x01}} // 250KHz
     };
+
+    static bool waitForIrqFlag1(uint8_t mask, uint32_t timeoutUs, const char *label) {
+        const uint32_t started = micros();
+        while ((micros() - started) < timeoutUs) {
+            if (readByte(REG_IRQFLAGS1) & mask) {
+                return true;
+            }
+            delayMicroseconds(10);
+        }
+        ets_printf("Radio timeout waiting for %s irq1=%02x op=%02x\n", label, readByte(REG_IRQFLAGS1), readByte(REG_OPMODE));
+        return false;
+    }
+
+    static bool waitForImageCal(uint32_t timeoutUs, const char *label) {
+        const uint32_t started = micros();
+        while ((micros() - started) < timeoutUs) {
+            if ((readByte(REG_IMAGECAL) & RF_IMAGECAL_IMAGECAL_RUNNING) != RF_IMAGECAL_IMAGECAL_RUNNING) {
+                return true;
+            }
+            delayMicroseconds(50);
+        }
+        ets_printf("Radio calibration timeout during %s imagecal=%02x\n", label, readByte(REG_IMAGECAL));
+        return false;
+    }
 
 /**
  * The function `SPI_beginTransaction` begins a SPI transaction and sets the RADIO_NSS pin to LOW.
@@ -75,16 +101,13 @@ namespace Radio {
 
         // SPI pins configuration
 
-        pinMode(RADIO_RESET, INPUT); // Connected to Reset; floating for POR
-
-        // Check the availability of the Radio
-        while (!digitalRead(RADIO_RESET)) {
-#if defined(ESP32)
-            esp_task_wdt_reset();
-#endif
-            delayMicroseconds(1);
-        }
-        delayMicroseconds(BOARD_READY_AFTER_POR);
+        // Hardware reset SX1276 before SPI init. This avoids starting from an
+        // unknown LoRa/FSK state after brownout or web-triggered reboot.
+        pinMode(RADIO_RESET, OUTPUT);
+        digitalWrite(RADIO_RESET, LOW);
+        delay(10);
+        digitalWrite(RADIO_RESET, HIGH);
+        delay(10);
 
         // Initialize SPI bus
 #if defined(ESP32)
@@ -96,17 +119,17 @@ namespace Radio {
         SPI.setHwCs(true);
 
         // Disable SPI device
-        // Disable device NRESET pin
         pinMode(RADIO_NSS, OUTPUT);
-        pinMode(RADIO_RESET, OUTPUT);
-        digitalWrite(RADIO_RESET, HIGH);
         digitalWrite(RADIO_NSS, HIGH);
         delayMicroseconds(BOARD_READY_AFTER_POR);
 
-        // SPI.beginTransaction(Radio::SpiSettings);
-        // SPI.endTransaction();
-
-        writeByte(REG_OPMODE, RF_OPMODE_STANDBY); // Put Radio in Standby mode
+        // SX1276 can boot with LongRangeMode set. That bit may only be changed
+        // in Sleep mode, so explicitly enter FSK Sleep before Standby.
+        writeByte(REG_OPMODE, RF_OPMODE_SLEEP);
+        delay(1);
+        writeByte(REG_OPMODE, RF_OPMODE_LONGRANGEMODE_OFF | RF_OPMODE_MODULATIONTYPE_FSK | RF_OPMODE_SLEEP);
+        delay(1);
+        writeByte(REG_OPMODE, RF_OPMODE_LONGRANGEMODE_OFF | RF_OPMODE_MODULATIONTYPE_FSK | RF_OPMODE_STANDBY);
 
         pinMode(SCAN_LED, OUTPUT);
         digitalWrite(SCAN_LED, 1);
@@ -119,6 +142,38 @@ void setPreambleLength(uint16_t preambleLen) {
     ets_printf("Radio: Preamble length set to %u symbols\n", preambleLen);
 }
 
+    void applyDefaultRadioProfile() {
+        // Default profile: keep the existing 1W-stable SX1276 setup.
+        if (twoWProfileActive) writeByte(REG_SYNCVALUE3, defaultSyncByte3);
+        twoWProfileActive = false;
+        writeByte(
+            REG_SYNCCONFIG,
+            RF_SYNCCONFIG_AUTORESTARTRXMODE_WAITPLL_OFF | RF_SYNCCONFIG_PREAMBLEPOLARITY_AA | RF_SYNCCONFIG_SYNC_ON);
+        writeByte(REG_SYNCVALUE1, SYNC_BYTE_1);
+        writeByte(REG_SYNCVALUE2, SYNC_BYTE_2);
+        writeByte(REG_DIOMAPPING1, 0x3D);
+        writeByte(REG_DIOMAPPING2, 0xF1);
+        writeByte(REG_RXCONFIG,
+                  RF_RXCONFIG_AFCAUTO_OFF |
+                  RF_RXCONFIG_AGCAUTO_ON |
+                  RF_RXCONFIG_RXTRIGER_RSSI_PREAMBLEDETECT |
+                  RF_RXCONFIG_RESTARTRXONCOLLISION_ON |
+                  RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK);
+    }
+
+    void applyTwoWHomeControlProfile() {
+        // Experimental 2W profile for comparison with laberning/home_io_control.
+        // It is only applied during explicit 2W scan/pair windows so normal 1W RX remains untouched.
+        if (!twoWProfileActive) defaultSyncByte3 = readByte(REG_SYNCVALUE3);
+        twoWProfileActive = true;
+        writeByte(REG_SYNCCONFIG, 0x52); // AA preamble, sync on, three sync bytes.
+        writeByte(REG_SYNCVALUE1, 0x55);
+        writeByte(REG_SYNCVALUE2, 0xFF);
+        writeByte(REG_SYNCVALUE3, 0x33);
+        writeByte(REG_DIOMAPPING1, 0x39);
+        writeByte(REG_DIOMAPPING2, 0xF1);
+        writeByte(REG_RXCONFIG, 0x9E);
+    }
 /**
  * The `initRegisters` function initializes various registers of a radio module for both transmission
  * and reception in a C++ program.
@@ -148,23 +203,6 @@ void setPreambleLength(uint16_t preambleLen) {
             REG_PACKETCONFIG2,
             RF_PACKETCONFIG2_DATAMODE_PACKET | RF_PACKETCONFIG2_IOHOME_ON | RF_PACKETCONFIG2_IOHOME_POWERFRAME);
         // Is IoHomePowerFrame useful ?
-
-        // Preamble shall be set to AA for packets to be received by appliances. Sync word shall be set with different values if Rx or Tx
-        writeByte(
-            REG_SYNCCONFIG,
-            RF_SYNCCONFIG_AUTORESTARTRXMODE_WAITPLL_OFF | RF_SYNCCONFIG_PREAMBLEPOLARITY_AA | RF_SYNCCONFIG_SYNC_ON);
-        //0x51); // 0x91); // TODOVERIFY 0x92
-        //RF_SYNCCONFIG_AUTORESTARTRXMODE_WAITPLL_ON | RF_SYNCCONFIG_PREAMBLEPOLARITY_AA | RF_SYNCCONFIG_SYNC_ON);
-
-        // IO-homecontrol sync word used by the working SX1276 reference.
-        writeByte(REG_SYNCVALUE1, SYNC_BYTE_1);
-        writeByte(REG_SYNCVALUE2, SYNC_BYTE_2);
-
-        // Match CyrilOpenSource/iown-homecontrol-esp32sx1276 SX1276 mapping.
-        // DIO0: PayloadReady/PacketSent, DIO2: Sync/Preamble line.
-        writeByte(REG_DIOMAPPING1, 0x3D);
-        writeByte(REG_DIOMAPPING2, 0xF1);
-
         // Enable Fast Hoping (frequency change) // Not needed all the time
         // Not using that, as it miss a lot of frames
         if (MAX_FREQS != 1)
@@ -190,13 +228,7 @@ void setPreambleLength(uint16_t preambleLen) {
         writeByte(REG_PAYLOADLENGTH, 0xff);
         // RSSI precision +-2dBm
         writeByte(REG_RSSICONFIG, RF_RSSICONFIG_SMOOTHING_4);
-        // Reference setup: RSSI+preamble trigger and no AFC auto while FHSS hopping.
-        writeByte(REG_RXCONFIG,
-                  RF_RXCONFIG_AFCAUTO_OFF |
-                  RF_RXCONFIG_AGCAUTO_ON |
-                  RF_RXCONFIG_RXTRIGER_RSSI_PREAMBLEDETECT |
-                  RF_RXCONFIG_RESTARTRXONCOLLISION_ON |
-                  RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK);
+        applyDefaultRadioProfile();
         writeByte(REG_AFCBW, 0x10);
 
         writeByte(REG_AFCFEI, 0x01);
@@ -231,17 +263,15 @@ void setPreambleLength(uint16_t preambleLen) {
         // Start image and RSSI calibration
         writeByte(
             REG_IMAGECAL, (RF_IMAGECAL_AUTOIMAGECAL_MASK & RF_IMAGECAL_IMAGECAL_MASK) | RF_IMAGECAL_IMAGECAL_START);
-        // Wait end of calibration
-        while ((readByte(REG_IMAGECAL) & RF_IMAGECAL_IMAGECAL_RUNNING) == RF_IMAGECAL_IMAGECAL_RUNNING) {
-        }
+        // Wait end of calibration, but never block boot forever.
+        waitForImageCal(20000, "LF");
         // Set a Frequency in HF band
         Radio::setCarrier(Radio::Carrier::Frequency, 868000000);
         // Start image and RSSI calibration
         writeByte(
             REG_IMAGECAL, (RF_IMAGECAL_AUTOIMAGECAL_MASK & RF_IMAGECAL_IMAGECAL_MASK) | RF_IMAGECAL_IMAGECAL_START);
-        // Wait end of calibration
-        while ((readByte(REG_IMAGECAL) & RF_IMAGECAL_IMAGECAL_RUNNING) == RF_IMAGECAL_IMAGECAL_RUNNING) {
-        }
+        // Wait end of calibration, but never block boot forever.
+        waitForImageCal(20000, "HF");
 
         // Restore context
         writeByte(REG_PACONFIG, regPaConfigInitVal);
@@ -289,24 +319,17 @@ void setPreambleLength(uint16_t preambleLen) {
     }
 
     void IRAM_ATTR setTx() {
-        // Reference setup: TX uses 2-byte sync FF 33.
-        writeByte(REG_SYNCCONFIG, 0x51);
+        // Preserve all three 2W sync bytes (55 FF 33); default 1W uses FF 33.
+        writeByte(REG_SYNCCONFIG, twoWProfileActive ? 0x52 : 0x51);
         writeByte(REG_OPMODE, 0x03);
+        waitForIrqFlag1(RF_IRQFLAGS1_TXREADY, 5000, "TXREADY");
     }
 
     void IRAM_ATTR setRx() {
         // Reference setup: RX uses sync-size 3 while keeping FF 33 in the first sync bytes.
         writeByte(REG_SYNCCONFIG, 0x52);
         writeByte(REG_OPMODE, 0x05);
-        const uint32_t started = micros();
-        while ((micros() - started) < 5000) {
-            const uint8_t opMode = readByte(REG_OPMODE) & ~RF_OPMODE_MASK;
-            const uint8_t irq1 = readByte(REG_IRQFLAGS1);
-            if (opMode == RF_OPMODE_RECEIVER && (irq1 & RF_IRQFLAGS1_RXREADY)) {
-                break;
-            }
-            delayMicroseconds(50);
-        }
+        waitForIrqFlag1(RF_IRQFLAGS1_RXREADY, 5000, "RXREADY");
         /*
                 // Start Sequencer
                 writeByte(REG_OPMODE, (readByte(REG_OPMODE) & RF_OPMODE_MASK) | RF_OPMODE_RECEIVER);

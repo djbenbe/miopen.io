@@ -34,8 +34,17 @@ static TaskHandle_t s_mqttPostConnectTask = nullptr;
 static std::atomic<bool> s_heartbeatEnabled{false};
 static std::atomic<uint32_t> s_nextHeartbeatAtMs{0};
 static uint32_t s_lastMqttConnectAttemptMs = 0;
-static constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
-static constexpr uint32_t MQTT_CONNECT_TIMEOUT_MS = 15000;
+static uint32_t s_nextMqttConnectAttemptMs = 0;
+static uint32_t s_mqttReconnectDelayMs = 15000;
+static constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 15000;
+static constexpr uint32_t MQTT_RECONNECT_MAX_INTERVAL_MS = 120000;
+static constexpr uint32_t MQTT_CONNECT_TIMEOUT_MS = 20000;
+static constexpr uint16_t MQTT_KEEPALIVE_SECONDS = 60;
+static constexpr uint32_t MQTT_STALL_RESET_MS = 10UL * 60UL * 1000UL;
+static constexpr uint32_t MQTT_STALL_RESTART_MS = 30UL * 60UL * 1000UL;
+static uint32_t s_mqttDisconnectedSinceMs = 0;
+static uint32_t s_lastMqttRecoveryMs = 0;
+static uint8_t s_mqttRecoveryCount = 0;
 
 static void mqttSchedulerTask(void*);
 static void publishIohcFrameDiscovery();
@@ -52,6 +61,30 @@ void publishHeartbeat();
 void mqttFuncHandler(const char *cmd);
 static void mqttPostConnectTask(void*);
 static void handleMqttConnectImpl();
+
+static void scheduleMqttReconnect(uint32_t now) {
+    s_nextMqttConnectAttemptMs = now + s_mqttReconnectDelayMs;
+    if (s_mqttReconnectDelayMs < MQTT_RECONNECT_MAX_INTERVAL_MS) {
+        s_mqttReconnectDelayMs = min(s_mqttReconnectDelayMs * 2, MQTT_RECONNECT_MAX_INTERVAL_MS);
+    }
+}
+
+static void resetMqttReconnectBackoff() {
+    s_mqttReconnectDelayMs = MQTT_RECONNECT_INTERVAL_MS;
+    s_nextMqttConnectAttemptMs = 0;
+}
+
+static bool shouldLogMqttStatus(uint8_t slot, uint32_t now, uint32_t intervalMs) {
+    static uint32_t lastLogMs[4] = {};
+    if (slot >= 4) {
+        return true;
+    }
+    if (lastLogMs[slot] != 0 && static_cast<int32_t>(now - lastLogMs[slot]) < static_cast<int32_t>(intervalMs)) {
+        return false;
+    }
+    lastLogMs[slot] = now;
+    return true;
+}
 
 static void populateGatewayDevice(JsonVariant variant) {
     JsonObject device = variant.to<JsonObject>();
@@ -130,10 +163,18 @@ void initMqtt() {
     if (!nvs_read_u16(NVS_KEY_MQTT_PORT, mqtt_port)) {
         nvs_write_u16(NVS_KEY_MQTT_PORT, mqtt_port);
     }
+    if (!nvs_read_bool(NVS_KEY_MQTT_ANON, mqtt_allow_anonymous)) {
+        nvs_write_bool(NVS_KEY_MQTT_ANON, mqtt_allow_anonymous);
+    }
 
     mqttClient.setWill(AVAILABILITY_TOPIC, 0, true, "offline");
     mqttClient.setClientId(mqtt_client_id.c_str());
-    mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+    mqttClient.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
+    if (mqtt_allow_anonymous) {
+        mqttClient.setCredentials(nullptr, nullptr);
+    } else {
+        mqttClient.setCredentials(mqtt_user.c_str(), mqtt_password.c_str());
+    }
     mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
     mqttClient.onConnect(onMqttConnect);
     mqttClient.onDisconnect(onMqttDisconnect);
@@ -405,13 +446,29 @@ void connectToMqtt() {
         Serial.println("WiFi not connected, skipping MQTT connection");
         return;
     }
+    const uint32_t now = millis();
     if (mqtt_server.empty()) {
         Serial.println("MQTT server not configured");
+        mqttStatus = ConnState::Disconnected;
+        scheduleMqttReconnect(now);
         return;
     }
-    s_lastMqttConnectAttemptMs = millis();
-    Serial.printf("Connecting to MQTT at %s:%u...\n", mqtt_server.c_str(), mqtt_port);
-    addLogMessage(String("Connecting to MQTT at ") + mqtt_server.c_str() + ":" + String(mqtt_port));
+    if (!mqtt_allow_anonymous && (mqtt_user.empty() || mqtt_password.empty())) {
+        Serial.println("MQTT username/password required; anonymous MQTT is disabled");
+        addLogMessage("MQTT username/password required; anonymous MQTT is disabled");
+        mqttStatus = ConnState::Disconnected;
+        scheduleMqttReconnect(now);
+        updateDisplayStatus();
+        return;
+    }
+    if (s_nextMqttConnectAttemptMs != 0 && static_cast<int32_t>(now - s_nextMqttConnectAttemptMs) < 0) {
+        return;
+    }
+    s_lastMqttConnectAttemptMs = now;
+    if (shouldLogMqttStatus(0, now, 30000)) {
+        Serial.printf("Connecting to MQTT at %s:%u...\n", mqtt_server.c_str(), mqtt_port);
+        addLogMessage(String("Connecting to MQTT at ") + mqtt_server.c_str() + ":" + String(mqtt_port));
+    }
     mqttStatus = ConnState::Connecting;
     updateDisplayStatus();
     mqttClient.connect();
@@ -421,6 +478,10 @@ void onMqttConnect(bool sessionPresent) {
     Serial.println("Connected to MQTT.");
     addLogMessage(String("Connected to MQTT at ") + mqtt_server.c_str() + ":" + String(mqtt_port));
     mqttStatus = ConnState::Connected;
+    s_mqttDisconnectedSinceMs = 0;
+    s_lastMqttRecoveryMs = 0;
+    s_mqttRecoveryCount = 0;
+    resetMqttReconnectBackoff();
     updateDisplayStatus();
 
     //mqttClient.subscribe("iown/powerOn", 0);
@@ -447,10 +508,18 @@ void onMqttConnect(bool sessionPresent) {
 }
 
 void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
-    Serial.print("Disconnected from MQTT. Reason: ");
-    Serial.println(static_cast<uint8_t>(reason));
-    addLogMessage(String("Disconnected from MQTT (reason ") + String(static_cast<uint8_t>(reason)) + ")");
+    const uint32_t now = millis();
+    if (shouldLogMqttStatus(1, now, 30000)) {
+        Serial.print("Disconnected from MQTT. Reason: ");
+        Serial.println(static_cast<uint8_t>(reason));
+        addLogMessage(String("Disconnected from MQTT (reason ") + String(static_cast<uint8_t>(reason)) + ")");
+    }
     mqttStatus = ConnState::Disconnected;
+    if (s_mqttDisconnectedSinceMs == 0) {
+        s_mqttDisconnectedSinceMs = now;
+    }
+    s_lastMqttConnectAttemptMs = now;
+    scheduleMqttReconnect(now);
     updateDisplayStatus();
     stopHeartbeat();
 }
@@ -461,18 +530,55 @@ static void mqttSchedulerTask(void*) {
 
         const uint32_t now = millis();
 
-        if (mqttStatus == ConnState::Connecting &&
-            static_cast<int32_t>(now - s_lastMqttConnectAttemptMs) >= static_cast<int32_t>(MQTT_CONNECT_TIMEOUT_MS)) {
-            Serial.println("MQTT connect timeout, retrying later");
-            addLogMessage("MQTT connect timeout, retrying later");
-            mqttClient.disconnect();
+        if (mqttStatus == ConnState::Connected && !mqttClient.connected()) {
             mqttStatus = ConnState::Disconnected;
+            if (s_mqttDisconnectedSinceMs == 0) {
+                s_mqttDisconnectedSinceMs = now;
+            }
+            scheduleMqttReconnect(now);
             updateDisplayStatus();
         }
 
-        if (mqttStatus == ConnState::Disconnected && WiFi.status() == WL_CONNECTED &&
-            static_cast<int32_t>(now - s_lastMqttConnectAttemptMs) >= static_cast<int32_t>(MQTT_RECONNECT_INTERVAL_MS)) {
-            connectToMqtt();
+        if (mqttStatus == ConnState::Connecting &&
+            static_cast<int32_t>(now - s_lastMqttConnectAttemptMs) >= static_cast<int32_t>(MQTT_CONNECT_TIMEOUT_MS)) {
+            if (shouldLogMqttStatus(2, now, 60000)) {
+                Serial.println("MQTT connect timeout, retrying later");
+                addLogMessage("MQTT connect timeout, retrying later");
+            }
+            mqttClient.disconnect();
+            mqttStatus = ConnState::Disconnected;
+            scheduleMqttReconnect(now);
+            updateDisplayStatus();
+        }
+
+        if (mqttStatus == ConnState::Disconnected && WiFi.status() == WL_CONNECTED) {
+            if (s_mqttDisconnectedSinceMs == 0) {
+                s_mqttDisconnectedSinceMs = now;
+            }
+            const uint32_t disconnectedMs = now - s_mqttDisconnectedSinceMs;
+            const uint32_t sinceRecoveryMs = now - s_lastMqttRecoveryMs;
+            if (disconnectedMs >= MQTT_STALL_RESET_MS &&
+                (s_lastMqttRecoveryMs == 0 || sinceRecoveryMs >= MQTT_STALL_RESET_MS)) {
+                s_lastMqttRecoveryMs = now;
+                ++s_mqttRecoveryCount;
+                Serial.println("MQTT watchdog: forcing reconnect after long disconnect");
+                addLogMessage("MQTT watchdog: forcing reconnect after long disconnect");
+                mqttClient.disconnect();
+                resetMqttReconnectBackoff();
+                s_nextMqttConnectAttemptMs = now;
+            }
+            if (disconnectedMs >= MQTT_STALL_RESTART_MS && s_mqttRecoveryCount >= 2) {
+                Serial.println("MQTT watchdog: restarting after prolonged MQTT outage");
+                addLogMessage("MQTT watchdog: restarting after prolonged MQTT outage");
+                delay(100);
+                ESP.restart();
+            }
+            if (s_nextMqttConnectAttemptMs == 0) {
+                s_nextMqttConnectAttemptMs = now;
+            }
+            if (static_cast<int32_t>(now - s_nextMqttConnectAttemptMs) >= 0) {
+                connectToMqtt();
+            }
         }
 
         if (s_heartbeatEnabled.load() &&
