@@ -630,6 +630,29 @@
         }
     }
 
+    async function clearInterfaceCache(app) {
+        setSettingsStatus(app, app.i18nText("status.cache_clearing", "Clearing interface cache..."), false, 20000);
+        try {
+            if ("caches" in window) {
+                const cacheNames = await window.caches.keys();
+                await Promise.all(cacheNames.map(function (name) {
+                    return window.caches.delete(name);
+                }));
+            }
+            if ("serviceWorker" in navigator) {
+                const registrations = await navigator.serviceWorker.getRegistrations();
+                await Promise.all(registrations.map(function (registration) {
+                    return registration.unregister();
+                }));
+            }
+            const reloadUrl = new URL(window.location.href);
+            reloadUrl.searchParams.set("refresh", Date.now().toString());
+            window.location.replace(reloadUrl.toString());
+        } catch (error) {
+            setSettingsStatus(app, error.message || "Could not clear interface cache", true, 20000);
+        }
+    }
+
     function initSettingsTabs() {
         const tabs = Array.from(document.querySelectorAll("[data-settings-tab]"));
         const panels = Array.from(document.querySelectorAll("[data-settings-panel]"));
@@ -688,6 +711,13 @@
         if (githubUpdateCheckButton) {
             githubUpdateCheckButton.addEventListener("click", function () {
                 checkGithubUpdate(app);
+            });
+        }
+
+        const clearInterfaceCacheButton = document.getElementById("clear-interface-cache");
+        if (clearInterfaceCacheButton) {
+            clearInterfaceCacheButton.addEventListener("click", function () {
+                clearInterfaceCache(app);
             });
         }
 
@@ -757,7 +787,16 @@
         app.sendSyslogTest = function () {
             return sendSyslogTest(app);
         };
-        app.uploadFirmware = function () {
+        app.uploadFirmware = async function () {
+            try {
+                const info = await window.MiOpenApi.requestJson("/api/info");
+                if (info.otaAvailable === false) {
+                    setSettingsStatus(app, "Web firmware upload is unavailable on this partition layout; migrate once with PC/USB first", true, 20000);
+                    return;
+                }
+            } catch (_error) {
+                // The upload handler performs the same check and returns its detail.
+            }
             return uploadSelectedFile(
                 app,
                 app.elements.firmwareFileInput,

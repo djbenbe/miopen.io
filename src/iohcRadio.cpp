@@ -56,6 +56,7 @@ namespace IOHC {
     struct Callback {
         IohcPacketDelegate *callback;
         iohcPacket *packet;
+        bool isTxCompletion;
     };
 
     static volatile uint32_t twoWPayloadIrqCount = 0;
@@ -163,7 +164,17 @@ namespace IOHC {
         Callback *callback = NULL;
         while (true) {
             if (xQueueReceive(callbackQueue, &callback, portMAX_DELAY) == pdPASS && callback != NULL) {
-                (*callback->callback)(callback->packet);
+                if (callback->isTxCompletion && callback->packet) {
+                    packetStamp.store(esp_timer_get_time());
+                    callback->packet->decode(false);
+                    addLogMessage(String(callback->packet->decodeToString(true).c_str()));
+#if defined(MQTT)
+                    publishRadioLogEvent(callback->packet, "TX");
+#endif
+                }
+                if (callback->callback) {
+                    (*callback->callback)(callback->packet);
+                }
                 delete callback->packet;
                 vPortFree(callback);
             }
@@ -721,7 +732,7 @@ void iohcRadio::onTxTicker(void *arg) {
 #endif
 }
 
-bool queueCallback(IohcPacketDelegate* callback, iohcPacket* packet) {
+bool queueCallback(IohcPacketDelegate* callback, iohcPacket* packet, bool isTxCompletion = false) {
     Callback *callbackData = (Callback*) pvPortMalloc(sizeof(Callback));
     if (callbackData == NULL) {
         return false;
@@ -729,9 +740,9 @@ bool queueCallback(IohcPacketDelegate* callback, iohcPacket* packet) {
 
     callbackData->callback = callback;
     callbackData->packet = packet;
+    callbackData->isTxCompletion = isTxCompletion;
 
-    if (xQueueSendToBack(callbackQueue, &callbackData, pdMS_TO_TICKS(25)) != pdPASS) {
-        addLogMessage("Radio callback queue full; dropping packet");
+    if (xQueueSendToBack(callbackQueue, &callbackData, 0) != pdPASS) {
         vPortFree(callbackData);
         return false;
     }
@@ -750,15 +761,7 @@ bool queueCallback(IohcPacketDelegate* callback, iohcPacket* packet) {
  */
     bool IRAM_ATTR iohcRadio::sent(iohcPacket *packet) {
         bool ret = false;
-        if (packet) {
-            packetStamp.store(esp_timer_get_time());
-            packet->decode(false);
-            addLogMessage(String(packet->decodeToString(true).c_str()));
-#if defined(MQTT)
-            publishRadioLogEvent(packet, "TX");
-#endif
-        }
-        if (txCB && !queueCallback(&txCB, packet)) {
+        if (!queueCallback(txCB ? &txCB : nullptr, packet, true)) {
             delete packet;
         }
         return ret;

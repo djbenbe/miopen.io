@@ -41,11 +41,13 @@ namespace {
     static const char *TAG    = "SYSLOG";
 
 
-    String configuredSntpServer() {
+    String configuredSntpServer(bool *isCustomServer = nullptr) {
         std::string sntp;
         if (nvs_read_string(NVS_KEY_NET_SNTP, sntp) && !sntp.empty()) {
+            if (isCustomServer) *isCustomServer = true;
             return String(sntp.c_str());
         }
+        if (isCustomServer) *isCustomServer = false;
         return String("pool.ntp.org");
     }
 
@@ -142,14 +144,19 @@ void startSyslogTimeSync() {
     }
 
     const String timezone = configuredTimezone();
-    const String server = configuredSntpServer();
-    configTzTime(timezone.c_str(), server.c_str(), "time.google.com", "time.cloudflare.com");
+    bool customServer = false;
+    const String server = configuredSntpServer(&customServer);
+    if (customServer) {
+        configTzTime(timezone.c_str(), server.c_str());
+    } else {
+        configTzTime(timezone.c_str(), server.c_str(), "time.google.com", "time.cloudflare.com");
+    }
     lastTimeSyncAttemptMs = nowMs;
     const bool retry = timeSyncAttempted;
     timeSyncAttempted = true;
 
     addLogMessage(String("Time synchronization ") + (retry ? "retry" : "started") +
-                  " using " + server);
+                  " using " + server + (customServer ? " (configured only)" : ""));
 }
 
 void maintainSyslogTimeSync() {

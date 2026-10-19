@@ -1,5 +1,6 @@
 import os
 import subprocess
+from datetime import datetime
 
 def get_version():
     try:
@@ -27,13 +28,16 @@ def get_branch():
 
 version = get_version()
 branch = get_branch()
+build_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %z")
 
 try:
     Import("env")
 except NameError:
-    print(f"-DFIRMWARE_VERSION='\"{version}\"' -DFIRMWARE_BRANCH='\"{branch}\"'")
+    print(f"-DFIRMWARE_VERSION='\"{version}\"' -DFIRMWARE_BRANCH='\"{branch}\"' "
+          f"-DFIRMWARE_BUILD_TIME='\"{build_time}\"'")
 else:
     env.Append(CPPDEFINES=[
         ("FIRMWARE_VERSION", f'\\"{version}\\"'),
-        ("FIRMWARE_BRANCH", f'\\"{branch}\\"')
+        ("FIRMWARE_BRANCH", f'\\"{branch}\\"'),
+        ("FIRMWARE_BUILD_TIME", f'\\"{build_time}\\"')
     ])

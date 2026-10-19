@@ -266,5 +266,7 @@
     "label.mqtt_allow_anonymous": "Autoriser MQTT anonyme",
     "hint.mqtt_allow_anonymous": "Activez ceci uniquement pour les brokers qui autorisent volontairement l'acces anonyme.",
     "status.restart_scheduled": "Redemarrage planifie",
-    "status.restart_failed": "Echec du redemarrage"
+    "status.restart_failed": "Echec du redemarrage",
+    "button.clear_interface_cache": "Vider le cache de l'interface",
+    "status.cache_clearing": "Vidage du cache de l'interface..."
 }

@@ -466,7 +466,8 @@
                 const el = document.getElementById("firmware-version");
                 if (el && info.version) {
                     const branch = info.branch ? " (" + info.branch + ")" : "";
-                    el.textContent = "Firmware: " + info.version + branch;
+                    const buildTime = info.buildTime ? " | build " + info.buildTime : "";
+                    el.textContent = "Firmware: " + info.version + branch + buildTime;
                 }
                 if (uptime) {
                     if (Number.isFinite(info.uptimeMs) && info.uptimeMs >= 0) {

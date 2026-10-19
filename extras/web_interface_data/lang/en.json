@@ -267,5 +267,7 @@
     "label.mqtt_allow_anonymous": "Allow anonymous MQTT",
     "hint.mqtt_allow_anonymous": "Only enable this for brokers that intentionally allow anonymous access.",
     "status.restart_scheduled": "Restart scheduled",
-    "status.restart_failed": "Restart failed"
+    "status.restart_failed": "Restart failed",
+    "button.clear_interface_cache": "Clear interface cache",
+    "status.cache_clearing": "Clearing interface cache..."
 }

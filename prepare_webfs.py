@@ -3,12 +3,14 @@ Import("env")
 import gzip
 import os
 import shutil
+from datetime import datetime
 
 
 project_dir = env.subst("$PROJECT_DIR")
 source_dir = os.path.join(project_dir, "extras")
 staging_dir = os.path.join(env.subst("$BUILD_DIR"), "webfs")
 compress_extensions = {".css", ".html", ".js", ".json"}
+web_build = datetime.now().astimezone().strftime("%Y%m%d%H%M%S")
 
 if os.path.isdir(staging_dir):
     shutil.rmtree(staging_dir)
@@ -28,6 +30,9 @@ for root, _, files in os.walk(source_dir):
 
         if is_web_asset and extension in compress_extensions:
             with open(source_path, "rb") as source_file:
+                content = source_file.read()
+                if filename == "index.html":
+                    content = content.replace(b"__WEB_BUILD__", web_build.encode("ascii"))
                 with open(output_path + ".gz", "wb") as compressed_file:
                     with gzip.GzipFile(
                         filename="",
@@ -36,7 +41,7 @@ for root, _, files in os.walk(source_dir):
                         fileobj=compressed_file,
                         mtime=0,
                     ) as gzip_file:
-                        shutil.copyfileobj(source_file, gzip_file)
+                        gzip_file.write(content)
         else:
             shutil.copy2(source_path, output_path)
 

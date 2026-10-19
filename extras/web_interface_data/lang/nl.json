@@ -267,5 +267,7 @@
     "label.mqtt_allow_anonymous": "Anonieme MQTT toestaan",
     "hint.mqtt_allow_anonymous": "Alleen inschakelen voor brokers die bewust anonieme toegang toestaan.",
     "status.restart_scheduled": "Herstart ingepland",
-    "status.restart_failed": "Herstart mislukt"
+    "status.restart_failed": "Herstart mislukt",
+    "button.clear_interface_cache": "Interfacecache wissen",
+    "status.cache_clearing": "Interfacecache wordt gewist..."
 }

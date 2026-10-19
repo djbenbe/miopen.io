@@ -266,5 +266,7 @@
     "label.mqtt_allow_anonymous": "Anonymes MQTT erlauben",
     "hint.mqtt_allow_anonymous": "Nur fuer Broker aktivieren, die anonymen Zugriff bewusst erlauben.",
     "status.restart_scheduled": "Neustart geplant",
-    "status.restart_failed": "Neustart fehlgeschlagen"
+    "status.restart_failed": "Neustart fehlgeschlagen",
+    "button.clear_interface_cache": "Oberflachencache leeren",
+    "status.cache_clearing": "Oberflachencache wird geleert..."
 }

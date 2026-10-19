@@ -924,12 +924,22 @@ void handleApiInfo(AsyncWebServerRequest *request, JsonObject &root) {
 #else
   root["version"] = "dev";
 #endif
+#ifdef FIRMWARE_BUILD_TIME
+  root["buildTime"] = FIRMWARE_BUILD_TIME;
+#endif
   root["uptimeMs"] = millis();
   root["freeHeap"] = ESP.getFreeHeap();
   root["wifiConnected"] = WiFi.status() == WL_CONNECTED;
   root["wifiRssi"] = wifiStatus.rssi.load();
   root["wifiQuality"] = wifiStatus.signalStrengthPercent.load();
   root["ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  const esp_partition_t *runningPartition = esp_ota_get_running_partition();
+  const esp_partition_t *nextPartition = esp_ota_get_next_update_partition(nullptr);
+  const bool otaAvailable = nextPartition &&
+      (!runningPartition || nextPartition->address != runningPartition->address);
+  root["otaAvailable"] = otaAvailable;
+  root["otaRunningPartition"] = runningPartition ? runningPartition->label : "";
+  root["otaNextPartition"] = nextPartition ? nextPartition->label : "";
 #if defined(MQTT)
   root["mqttConnected"] = mqttClient.connected();
   root["mqttState"] = mqttStatus == ConnState::Connected ? "connected" :
@@ -1209,6 +1219,7 @@ struct WebUpdateState {
   bool completed;
   bool failed;
   size_t bytesWritten;
+  uint32_t targetPartitionAddress;
   char error[128];
 };
 
@@ -1275,6 +1286,7 @@ static void handleWebUpdateUpload(AsyncWebServerRequest *request,
         state->failed = true;
         return;
       }
+      state->targetPartitionAddress = next->address;
     }
     if (!Update.begin(UPDATE_SIZE_UNKNOWN, filesystem ? U_SPIFFS : U_FLASH)) {
       setWebUpdateError(state, "Update begin failed");
@@ -1299,6 +1311,15 @@ static void handleWebUpdateUpload(AsyncWebServerRequest *request,
       setWebUpdateError(state, "Update verification failed");
       if (Update.isRunning()) Update.abort();
       return;
+    }
+    if (!filesystem) {
+      const esp_partition_t *boot = esp_ota_get_boot_partition();
+      if (!boot || boot->address != state->targetPartitionAddress) {
+        snprintf(state->error, sizeof(state->error),
+                 "Firmware written but next OTA partition was not selected for boot");
+        state->failed = true;
+        return;
+      }
     }
     state->completed = true;
     Serial.printf("%s upload complete: %u bytes\n",
@@ -1347,6 +1368,11 @@ void setupWebServer() {
   server.on("/api/devices", HTTP_GET, jsonGet(handleApiDevices));
   server.on("/api/remotes", HTTP_GET, jsonGet(handleApiRemotes));
   server.on("/api/logs", HTTP_GET, jsonGet(handleApiLogs));
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    auto *response = request->beginResponse(LittleFS, "/web_interface_data/index.html", "text/html");
+    response->addHeader("Cache-Control", "no-store, max-age=0, must-revalidate");
+    request->send(response);
+  });
   server.on("/api/lastaddr", HTTP_GET, jsonGet(handleApiLastAddr));
   server.on("/api/wifi-scan", HTTP_GET, jsonGet(handleApiWifiScan));
   server.on("/api/wifi/scan", HTTP_GET, jsonGet(handleApiWifiScan));
