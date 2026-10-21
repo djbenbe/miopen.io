@@ -8,6 +8,12 @@
 #pragma once
 #include <Arduino.h>
 
+// Apply the default local timezone before NVS is available.
+void configureDefaultLogTimezone();
+
+// Apply the timezone saved in NVS without starting SNTP.
+void configureSavedLogTimezone();
+
 // Start SNTP/NTP time sync after WiFi is connected. Non-blocking.
 void startSyslogTimeSync();
 

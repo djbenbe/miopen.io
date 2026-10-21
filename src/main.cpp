@@ -36,6 +36,7 @@
 #endif
 #include <wifi_helper.h>
 #include <nvs_helpers.h>
+#include <syslog_helper.h>
 #include "log_buffer.h"
 #include <stdarg.h>
 #include <algorithm>
@@ -247,10 +248,13 @@ int log_to_buffer_and_serial(const char *format, va_list args) {
 void setup() {
 
     Serial.begin(115200);       //Start serial connection for debug and manual input
+    configureDefaultLogTimezone();
     esp_log_set_vprintf(log_to_buffer_and_serial);
     esp_log_level_set("*", ESP_LOG_WARN);
     ESP_LOGW("SETUP", "START OF SETUP");
-    addLogMessage(String("Boot reset reason: ") + resetReasonName(esp_reset_reason()));
+    const esp_reset_reason_t resetReason = esp_reset_reason();
+    addLogMessage(String("Boot reset reason: ") + resetReasonName(resetReason) +
+                  " (code=" + String(static_cast<int>(resetReason)) + ")");
     const String crashMarker = getCrashMarker();
     if (!crashMarker.isEmpty()) {
         addLogMessage("Last crash marker: " + crashMarker);
@@ -272,6 +276,7 @@ void setup() {
     Serial.println("LittleFS mounted successfully");
 #endif
     nvs_init();
+    configureSavedLogTimezone();
 
     // Load 1W device definitions before starting network services so
     // that /api/devices can immediately return the configured remotes.

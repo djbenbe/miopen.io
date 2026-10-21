@@ -10,6 +10,7 @@
 #include <esp_random.h>
 #include <log_buffer.h>
 #include <nvs_helpers.h>
+#include <cstdlib>
 #include <time.h>
 #include "apps/sntp/sntp.h"
 
@@ -48,6 +49,7 @@ namespace {
     static constexpr uint32_t SYSLOG_MIN_SEND_INTERVAL_MS = 250;
     static constexpr uint32_t SYSLOG_ERROR_BACKOFF_MS = 60000;
     static const char *TAG    = "SYSLOG";
+    static constexpr char DEFAULT_TIMEZONE[] = "CET-1CEST,M3.5.0,M10.5.0/3";
     static constexpr size_t SNTP_SERVER_MAX_LEN = 256;
     static constexpr size_t TIMEZONE_MAX_LEN = 128;
     static char sntpServer[SNTP_SERVER_MAX_LEN] = "pool.ntp.org";
@@ -73,7 +75,12 @@ namespace {
         if (nvs_read_string(NVS_KEY_NET_TZ, tz) && !tz.empty()) {
             return String(tz.c_str());
         }
-        return String("CET-1CEST,M3.5.0,M10.5.0/3");
+        return String(DEFAULT_TIMEZONE);
+    }
+
+    void applyTimezone(const char *timezone) {
+        setenv("TZ", timezone && *timezone ? timezone : DEFAULT_TIMEZONE, 1);
+        tzset();
     }
 
     bool hasValidSystemTime() {
@@ -146,6 +153,15 @@ namespace {
         if (h && *h) return String(h);
         return WiFi.localIP().toString();
     }
+}
+
+void configureDefaultLogTimezone() {
+    applyTimezone(DEFAULT_TIMEZONE);
+}
+
+void configureSavedLogTimezone() {
+    const String timezone = configuredTimezone();
+    applyTimezone(timezone.c_str());
 }
 
 // Start SNTP once WiFi is connected. This is intentionally non-blocking.
@@ -314,6 +330,8 @@ void resetSyslog() {
 void startSyslogTimeSync() {}
 void maintainSyslogTimeSync() {}
 bool isSyslogTimeSynced() { return false; }
+void configureDefaultLogTimezone() {}
+void configureSavedLogTimezone() {}
 void loadSyslogConfig() {}
 void initSyslog() {}
 void resetSyslog() {}
