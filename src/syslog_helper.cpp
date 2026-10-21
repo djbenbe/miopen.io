@@ -11,6 +11,14 @@
 #include <log_buffer.h>
 #include <nvs_helpers.h>
 #include <time.h>
+#include "apps/sntp/sntp.h"
+
+// Arduino Core 2.0.17 exposes the base SNTP header but omits this extended
+// ESP-IDF declaration from the application include path.
+extern "C" {
+    typedef void (*sntp_sync_time_cb_t)(struct timeval *);
+    void sntp_set_time_sync_notification_cb(sntp_sync_time_cb_t callback);
+}
 
 // ===== Config (adjust if you like) =====
 #ifndef SYSLOG_FACILITY
@@ -31,6 +39,7 @@ namespace {
     bool         configLoaded = false;
     bool         timeSyncAttempted = false;
     bool         timeSyncReported = false;
+    volatile bool timeSyncReceived = false;
     uint32_t     lastTimeSyncAttemptMs = 0;
     uint32_t     syslogBackoffUntilMs = 0;
     uint32_t     lastSyslogSendMs = 0;
@@ -39,6 +48,14 @@ namespace {
     static constexpr uint32_t SYSLOG_MIN_SEND_INTERVAL_MS = 250;
     static constexpr uint32_t SYSLOG_ERROR_BACKOFF_MS = 60000;
     static const char *TAG    = "SYSLOG";
+    static constexpr size_t SNTP_SERVER_MAX_LEN = 256;
+    static constexpr size_t TIMEZONE_MAX_LEN = 128;
+    static char sntpServer[SNTP_SERVER_MAX_LEN] = "pool.ntp.org";
+    static char sntpTimezone[TIMEZONE_MAX_LEN] = "CET-1CEST,M3.5.0,M10.5.0/3";
+
+    void onSntpTimeSync(struct timeval *) {
+        timeSyncReceived = true;
+    }
 
 
     String configuredSntpServer(bool *isCustomServer = nullptr) {
@@ -134,23 +151,27 @@ namespace {
 // Start SNTP once WiFi is connected. This is intentionally non-blocking.
 void startSyslogTimeSync() {
     ensureConfigLoaded();
-    if (WiFi.status() != WL_CONNECTED || hasValidSystemTime()) {
+    if (WiFi.status() != WL_CONNECTED) {
         return;
     }
 
     const uint32_t nowMs = millis();
-    if (timeSyncAttempted && nowMs - lastTimeSyncAttemptMs < TIME_SYNC_RETRY_MS) {
+    if (timeSyncReceived ||
+        (timeSyncAttempted && nowMs - lastTimeSyncAttemptMs < TIME_SYNC_RETRY_MS)) {
         return;
     }
 
     const String timezone = configuredTimezone();
     bool customServer = false;
     const String server = configuredSntpServer(&customServer);
+    snprintf(sntpServer, sizeof(sntpServer), "%s", server.c_str());
+    snprintf(sntpTimezone, sizeof(sntpTimezone), "%s", timezone.c_str());
     if (customServer) {
-        configTzTime(timezone.c_str(), server.c_str());
+        configTzTime(sntpTimezone, sntpServer);
     } else {
-        configTzTime(timezone.c_str(), server.c_str(), "time.google.com", "time.cloudflare.com");
+        configTzTime(sntpTimezone, sntpServer, "time.google.com", "time.cloudflare.com");
     }
+    sntp_set_time_sync_notification_cb(onSntpTimeSync);
     lastTimeSyncAttemptMs = nowMs;
     const bool retry = timeSyncAttempted;
     timeSyncAttempted = true;
@@ -164,7 +185,7 @@ void maintainSyslogTimeSync() {
         return;
     }
 
-    if (!hasValidSystemTime()) {
+    if (!timeSyncReceived) {
         startSyslogTimeSync();
         return;
     }
@@ -181,12 +202,16 @@ void maintainSyslogTimeSync() {
 }
 
 bool isSyslogTimeSynced() {
-    return hasValidSystemTime();
+    return timeSyncReceived && hasValidSystemTime();
+}
+
+void loadSyslogConfig() {
+    ensureConfigLoaded();
 }
 
 // Initialize UDP + resolve syslog IP from user_config.h
 void initSyslog() {
-    ensureConfigLoaded();
+    loadSyslogConfig();
 
     if (!syslog_enabled) {
         resetSyslog();
@@ -289,6 +314,7 @@ void resetSyslog() {
 void startSyslogTimeSync() {}
 void maintainSyslogTimeSync() {}
 bool isSyslogTimeSynced() { return false; }
+void loadSyslogConfig() {}
 void initSyslog() {}
 void resetSyslog() {}
 void sendSyslog(const String &) {}

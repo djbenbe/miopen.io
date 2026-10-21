@@ -282,6 +282,11 @@ input, select {
     background: var(--color-input);
     color:var(--color-text);
 }
+
+.compact-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+.network-field { min-width: 0; }
+.network-field label { display: block; margin-bottom: 2px; font-size: 0.9em; }
+.network-field input { width: 100%; margin: 0; }
 .setting-toggle {
   display: flex;
   gap: 8px;
@@ -581,6 +586,7 @@ header h1 {
     }
 }
 @media (max-width: 640px) {
+    .compact-grid { grid-template-columns: 1fr; }
     body.menu-open {
       overflow: hidden;
     }

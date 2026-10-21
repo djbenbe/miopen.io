@@ -274,6 +274,9 @@
 
         ws.onclose = function () {
             app.state.wsConnected = false;
+            if (app.state.pageUnloading) {
+                return;
+            }
             if (!app.state.wsReconnectTimer) {
                 app.state.wsReconnectTimer = setTimeout(function () {
                     app.state.wsReconnectTimer = null;
@@ -281,6 +284,22 @@
                 }, 2000);
             }
         };
+    }
+
+    async function loadSettingsConfig(app) {
+        const loaders = [
+            app.loadMqttConfig,
+            app.loadWifiConfig,
+            app.loadNetworkConfig,
+            app.loadFallbackConfig,
+            app.loadDisplayConfig,
+            app.loadSyslogConfig
+        ];
+        for (const loader of loaders) {
+            if (typeof loader === "function") {
+                await loader.call(app);
+            }
+        }
     }
 
     function bindEvents(app) {
@@ -384,20 +403,7 @@
             window.MiOpenSettings.init(app);
             app.state.settingsPageReady = true;
             bindEvents(app);
-            [
-                app.loadMqttConfig,
-                app.loadWifiConfig,
-                app.loadNetworkConfig,
-                app.loadFallbackConfig,
-                app.loadDisplayConfig,
-                app.loadSyslogConfig
-            ].forEach(function (loader, index) {
-                if (typeof loader === "function") {
-                    setTimeout(function () {
-                        loader.call(app);
-                    }, index * 150);
-                }
-            });
+            loadSettingsConfig(app);
         }
         if (typeof window.applyI18n === "function") {
             window.applyI18n();
@@ -445,6 +451,16 @@
         initSuggestions(app);
         initTheme(app);
         initHelpButtons(app);
+        window.addEventListener("pagehide", function () {
+            app.state.pageUnloading = true;
+            if (app.state.wsReconnectTimer) {
+                clearTimeout(app.state.wsReconnectTimer);
+                app.state.wsReconnectTimer = null;
+            }
+            if (app.state.ws && app.state.ws.readyState === WebSocket.OPEN) {
+                app.state.ws.close(1000, "page reload");
+            }
+        });
         setTimeout(function () {
             initWebSocket(app);
         }, 800);

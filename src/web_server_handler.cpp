@@ -8,7 +8,10 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <new>
 #include <vector>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <LittleFS.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
@@ -65,8 +68,61 @@ struct TwoWFrameLog {
 static std::vector<TwoWFrameLog> g_twoWFrameLog;
 static std::vector<uint32_t> g_logSubscribers;
 static constexpr size_t TWO_W_FRAME_LOG_LIMIT = 30;
+static SemaphoreHandle_t g_logSubscribersMutex = nullptr;
+static SemaphoreHandle_t g_webSocketMutex = nullptr;
+static QueueHandle_t g_logBroadcastQueue = nullptr;
+
+struct QueuedLogBroadcast {
+  String payload;
+};
+
+static bool takeMutex(SemaphoreHandle_t mutex) {
+  return mutex && xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) == pdTRUE;
+}
+
+static void webSocketLogTask(void *) {
+  while (true) {
+    QueuedLogBroadcast *message = nullptr;
+    if (xQueueReceive(g_logBroadcastQueue, &message, portMAX_DELAY) != pdTRUE || !message) {
+      continue;
+    }
+
+    std::vector<uint32_t> subscribers;
+    if (takeMutex(g_logSubscribersMutex)) {
+      subscribers = g_logSubscribers;
+      xSemaphoreGive(g_logSubscribersMutex);
+    }
+
+    std::vector<uint32_t> staleClients;
+    if (!subscribers.empty() && takeMutex(g_webSocketMutex)) {
+      for (const uint32_t clientId : subscribers) {
+        AsyncWebSocketClient *client = ws.client(clientId);
+        if (!client || !client->canSend()) {
+          staleClients.push_back(clientId);
+          continue;
+        }
+        client->text(message->payload);
+      }
+      xSemaphoreGive(g_webSocketMutex);
+    }
+
+    if (!staleClients.empty() && takeMutex(g_logSubscribersMutex)) {
+      for (const uint32_t clientId : staleClients) {
+        auto it = std::find(g_logSubscribers.begin(), g_logSubscribers.end(), clientId);
+        if (it != g_logSubscribers.end()) {
+          g_logSubscribers.erase(it);
+        }
+      }
+      xSemaphoreGive(g_logSubscribersMutex);
+    }
+    delete message;
+  }
+}
 
 static void setLogSubscription(uint32_t clientId, bool enabled) {
+  if (!takeMutex(g_logSubscribersMutex)) {
+    return;
+  }
   auto it = std::find(g_logSubscribers.begin(), g_logSubscribers.end(), clientId);
   if (enabled) {
     if (it == g_logSubscribers.end()) {
@@ -75,6 +131,15 @@ static void setLogSubscription(uint32_t clientId, bool enabled) {
   } else if (it != g_logSubscribers.end()) {
     g_logSubscribers.erase(it);
   }
+  xSemaphoreGive(g_logSubscribersMutex);
+}
+
+static void wsTextAllClean(const String &payload) {
+  if (!takeMutex(g_webSocketMutex)) {
+    return;
+  }
+  ws.textAll(payload);
+  xSemaphoreGive(g_webSocketMutex);
 }
 
 static void fillTwoWStatus(JsonObject &obj) {
@@ -145,7 +210,10 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 
     String payload;
     serializeJson(doc, payload);
-    client->text(payload);
+    if (takeMutex(g_webSocketMutex)) {
+      client->text(payload);
+      xSemaphoreGive(g_webSocketMutex);
+    }
 
     JsonDocument twoWDoc;
     twoWDoc["type"] = "twowstatus";
@@ -158,7 +226,7 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 }
 
 void broadcastLog(const String &msg) {
-  if (g_logSubscribers.empty()) {
+  if (!g_logBroadcastQueue) {
     return;
   }
   JsonDocument doc;
@@ -166,15 +234,12 @@ void broadcastLog(const String &msg) {
   doc["message"] = msg;
   String payload;
   serializeJson(doc, payload);
-  ws.cleanupClients();
-  for (auto it = g_logSubscribers.begin(); it != g_logSubscribers.end();) {
-    AsyncWebSocketClient *client = ws.client(*it);
-    if (!client || !client->canSend()) {
-      it = g_logSubscribers.erase(it);
-      continue;
-    }
-    client->text(payload);
-    ++it;
+  auto *message = new (std::nothrow) QueuedLogBroadcast{payload};
+  if (!message) {
+    return;
+  }
+  if (xQueueSendToBack(g_logBroadcastQueue, &message, 0) != pdPASS) {
+    delete message;
   }
 }
 
@@ -185,7 +250,7 @@ void broadcastDevicePosition(const String &id, int position) {
   doc["position"] = position;
   String payload;
   serializeJson(doc, payload);
-  ws.textAll(payload);
+  wsTextAllClean(payload);
 }
 
 void broadcastDeviceAction(const String &id, const String &action, int position, int target, const String &source) {
@@ -198,7 +263,7 @@ void broadcastDeviceAction(const String &id, const String &action, int position,
   doc["source"] = source;
   String payload;
   serializeJson(doc, payload);
-  ws.textAll(payload);
+  wsTextAllClean(payload);
 }
 
 void broadcastLastAddress(const String &addr) {
@@ -207,7 +272,7 @@ void broadcastLastAddress(const String &addr) {
   doc["address"] = addr;
   String payload;
   serializeJson(doc, payload);
-  ws.textAll(payload);
+  wsTextAllClean(payload);
 }
 
 void updateTwoWTxStatus(const String &command, const String &result, bool isError) {
@@ -718,8 +783,11 @@ static void scheduleRestart(const char *taskName) {
     xTaskCreate(
       [](void *) {
         vTaskDelay(pdMS_TO_TICKS(1200));
-        ws.closeAll(1001, "restarting");
-        ws.cleanupClients();
+        if (takeMutex(g_webSocketMutex)) {
+          ws.closeAll(1001, "restarting");
+          ws.cleanupClients();
+          xSemaphoreGive(g_webSocketMutex);
+        }
         vTaskDelay(pdMS_TO_TICKS(1800));
         ESP.restart();
       },
@@ -791,6 +859,12 @@ void handleApiNetworkSet(AsyncWebServerRequest *request, JsonObject &doc, JsonOb
 
   if (!isValidHostname(hostname)) {
     request->send(400, "application/json", "{\"success\":false,\"message\":\"Invalid hostname\"}");
+    return;
+  }
+
+  if (sntp.length() >= 256 || tz.length() >= 128) {
+    request->send(400, "application/json",
+                  "{\"success\":false,\"message\":\"SNTP server or timezone is too long\"}");
     return;
   }
 
@@ -1014,7 +1088,8 @@ void handleApiDisplaySet(AsyncWebServerRequest *request, JsonObject &doc, JsonOb
 
 #if defined(SYSLOG)
 void handleApiSyslogGet(AsyncWebServerRequest *request, JsonObject &root) {
-  initSyslog();
+  // Reading Settings must not wait for DNS when the syslog host is unreachable.
+  loadSyslogConfig();
 
   root["enabled"] = syslog_enabled;
   root["server"] = syslog_server.c_str();
@@ -1355,6 +1430,23 @@ void handleFilesystemUpload(AsyncWebServerRequest *request, String filename,
 void setupWebServer() {
   Serial.println("Initializing HTTP server ...");
 
+  g_logSubscribersMutex = xSemaphoreCreateMutex();
+  g_webSocketMutex = xSemaphoreCreateMutex();
+  g_logBroadcastQueue = xQueueCreate(24, sizeof(QueuedLogBroadcast *));
+  if (g_logSubscribersMutex && g_webSocketMutex && g_logBroadcastQueue) {
+    if (xTaskCreate(webSocketLogTask, "wsLog", 4096, nullptr, 2, nullptr) != pdPASS) {
+      vQueueDelete(g_logBroadcastQueue);
+      g_logBroadcastQueue = nullptr;
+      Serial.println("WebSocket log task creation failed");
+    }
+  } else {
+    if (g_logBroadcastQueue) {
+      vQueueDelete(g_logBroadcastQueue);
+      g_logBroadcastQueue = nullptr;
+    }
+    Serial.println("WebSocket log synchronization unavailable");
+  }
+
   // Serve static files from /web_interface_data
   // Ensure this path matches where your platformio.ini places data files
   // or how you upload them (e.g., SPIFFS, LittleFS).
@@ -1455,7 +1547,10 @@ void loopWebServer() {
   const uint32_t nowMs = millis();
   if (nowMs - lastCleanupMs >= 1000) {
     lastCleanupMs = nowMs;
-    ws.cleanupClients(4);
+    if (takeMutex(g_webSocketMutex)) {
+      ws.cleanupClients(4);
+      xSemaphoreGive(g_webSocketMutex);
+    }
   }
 }
 

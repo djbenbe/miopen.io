@@ -20,6 +20,9 @@ bool isSyslogTimeSynced();
 // Initialize UDP + target IP from user_config.h
 void initSyslog();
 
+// Load saved syslog settings without resolving the server or opening UDP.
+void loadSyslogConfig();
+
 // Reset the UDP sender state so that configuration changes are applied
 void resetSyslog();
 

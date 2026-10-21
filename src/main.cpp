@@ -838,7 +838,8 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
                 }
                 doc["action"] = action;
                 display1WAction(iohc->payload.packet.header.source, action, "RX");
-                if (const auto *map = remoteMap->find(iohc->payload.packet.header.source)) {
+                if (remoteMap) {
+                    if (const auto *map = remoteMap->find(iohc->payload.packet.header.source)) {
                     IOHC::RemoteButton btn;
                     bool recognized = true;
                     if (!strcmp(action, "OPEN")) btn = IOHC::RemoteButton::Open;
@@ -852,6 +853,7 @@ bool msgRcvd(IOHC::iohcPacket *iohc) {
                         for (const auto &desc : map->devices) {
                             iohcRemote1W::getInstance()->handleRemoteAction(btn, desc);
                         }
+                    }
                     }
                 }
             } else {

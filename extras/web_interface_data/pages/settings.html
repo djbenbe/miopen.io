@@ -249,17 +249,15 @@
                 <input id="net-hostname" placeholder="MiOpenIO" />
                 <label style="display: flex; align-items: center; gap: 8px">
                   <input type="checkbox" id="net-dhcp" />DHCP</label>
-                <label for="net-ip">IP / mask / gateway:</label>
                 <div class="compact-grid">
-                  <input id="net-ip" placeholder="192.168.1.50" />
-                  <input id="net-mask" placeholder="255.255.255.0" />
-                  <input id="net-gateway" placeholder="192.168.1.1" />
+                  <div class="network-field"><label for="net-ip">IP address:</label><input id="net-ip" placeholder="192.168.1.50" /></div>
+                  <div class="network-field"><label for="net-mask">Subnet mask:</label><input id="net-mask" placeholder="255.255.255.0" /></div>
+                  <div class="network-field"><label for="net-gateway">Gateway:</label><input id="net-gateway" placeholder="192.168.1.1" /></div>
                 </div>
-                <label for="net-dns1">DNS / SNTP:</label>
                 <div class="compact-grid">
-                  <input id="net-dns1" placeholder="1.1.1.1" />
-                  <input id="net-dns2" placeholder="8.8.8.8" />
-                  <input id="net-sntp" placeholder="pool.ntp.org" />
+                  <div class="network-field"><label for="net-dns1">DNS server 1:</label><input id="net-dns1" placeholder="1.1.1.1" /></div>
+                  <div class="network-field"><label for="net-dns2">DNS server 2:</label><input id="net-dns2" placeholder="8.8.8.8" /></div>
+                  <div class="network-field"><label for="net-sntp">Time server (SNTP):</label><input id="net-sntp" placeholder="pool.ntp.org" /></div>
                 </div>
                 <label for="net-tz">Timezone:</label>
                 <select id="net-tz">

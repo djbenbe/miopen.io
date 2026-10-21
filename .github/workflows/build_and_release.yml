@@ -82,28 +82,15 @@ jobs:
           cat > changelog.md <<EOF
           Beta release build for ${{ github.ref_name }}.
 
-          Commit: ${{ github.sha }}
+          Fixes:
+          - WebSocket log delivery is serialized to prevent races while the page reloads.
+          - Settings no longer resolve the syslog host during page load; repeated reloads are lighter.
+          - A configured SNTP server stays in persistent memory and only reports synchronized after a real NTP reply.
+          - Extra 1W crash protection and more stack for the radio callback task.
+          - Async MQTT is pinned to a reproducible release compatible with AsyncTCP 3.5.0.
 
-          BELANGRIJK VOOR DEZE UPDATE
-          - Maak VOORAF een volledige backup via Instellingen.
-          - Voer deze eerste update via een pc en USB uit met het gecombineerde bestand voor jouw board.
-          - Het gecombineerde bestand bevat zowel de firmware als het filesystem. Installeer dus NIET alleen het losse firmwarebestand.
-          - Gebruik voor deze eerste migratie NIET de firmware- of filesystem-upload in de webinterface. De partitie-indeling en locatie van LittleFS veranderen.
-          - Herstel na de USB-update je backup via Instellingen.
-          - Na deze eenmalige USB-migratie kunnen volgende firmware- en filesystem-updates weer via de webinterface worden uitgevoerd.
-          - Heltec LoRa V2 heeft al twee firmwarepartities en heeft deze migratie niet nodig.
-
-          Bugfix: de webinterface meldt een firmware-upload alleen nog als geslaagd wanneer de ESP de volledige firmware heeft geschreven en gevalideerd.
-
-          Included files:
-          - LilyGoTBeamV12ESP32 combined firmware image
-          - LilyGoTBeamV12ESP32 firmware and filesystem images
-          - LilyGoLoraESP32 combined firmware image
-          - LilyGoLoraESP32 firmware and filesystem images
-          - HeltecLoraV2ESP32 combined firmware image
-          - HeltecLoraV2ESP32 firmware and filesystem images
-          - LilyGoT3S3 combined firmware image
-          - LilyGoT3S3 firmware and filesystem images
+          No new 2W changes are included in this Beta.
+          Make a backup in Settings before updating.
           EOF
 
       - name: Release

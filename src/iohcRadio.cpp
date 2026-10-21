@@ -205,7 +205,7 @@ namespace IOHC {
 #endif
 
         callbackQueue = xQueueCreate(40, sizeof(struct Callback *));
-        auto callbackTaskCode = xTaskCreatePinnedToCore(callbackTaskLoop, "CallbackTask", 4096, NULL, 5, &callbackTask, 0);
+        auto callbackTaskCode = xTaskCreatePinnedToCore(callbackTaskLoop, "CallbackTask", 8192, NULL, 5, &callbackTask, 0);
         if (callbackTaskCode != pdPASS || callbackQueue == NULL) {
             printf("ERROR: Can't create callback-task or corresponding queue %d\n", callbackTaskCode);
             // sx127x_destroy(device);
