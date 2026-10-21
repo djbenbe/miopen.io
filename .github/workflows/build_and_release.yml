@@ -87,9 +87,9 @@ jobs:
           - Settings no longer resolve the syslog host during page load; repeated reloads are lighter.
           - A configured SNTP server stays in persistent memory and only reports synchronized after a real NTP reply.
           - Extra 1W crash protection and more stack for the radio callback task.
+          - 2W RX/TX status, frame history and web reads are synchronized to prevent heap corruption during radio bursts.
           - Async MQTT is pinned to a reproducible release compatible with AsyncTCP 3.5.0.
 
-          No new 2W changes are included in this Beta.
           Make a backup in Settings before updating.
           EOF
 
