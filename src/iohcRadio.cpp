@@ -285,7 +285,7 @@ namespace IOHC {
         // Enable frequency hopping to scan all configured channels.
 #if defined(ESP32)
         if (!tickerTaskHandle &&
-            xTaskCreatePinnedToCore(radioTickerTaskLoop, "radioTicker", 4096, this,
+            xTaskCreatePinnedToCore(radioTickerTaskLoop, "radioTicker", 8192, this,
                                     4, &tickerTaskHandle, 0) != pdPASS) {
             tickerTaskHandle = nullptr;
             addLogMessage("Failed to create radio ticker task");

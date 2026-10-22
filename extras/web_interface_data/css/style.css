@@ -453,11 +453,17 @@ input, select {
 }
 #status-messages {
     min-height: 200px;
+    max-height: 480px;
+    overflow-y: auto;
     border: 1px solid var(--color7);
     padding: 10px;
     background-color: var(--color-input);
     border-radius: var(--radius);
     white-space: pre-wrap; /* So that newlines in messages are respected */
+    overflow-wrap: anywhere;
+}
+#status-messages p {
+    margin: 0 0 4px;
 }
 .device-selection {
   display: grid;

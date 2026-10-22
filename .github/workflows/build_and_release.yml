@@ -87,7 +87,8 @@ jobs:
           - Settings no longer resolve the syslog host during page load; repeated reloads are lighter.
           - A configured SNTP server stays in persistent memory and only reports synchronized after a real NTP reply.
           - The saved timezone is applied during boot and reset logs include the numeric ESP reset code.
-          - Extra 1W crash protection and more stack for the radio callback task.
+          - The radio ticker has more stack for busy 1W receive bursts.
+          - The log page is scrollable and keeps a bounded browser-side list of recent lines.
           - 2W RX/TX status, frame history and web reads are synchronized to prevent heap corruption during radio bursts.
           - Async MQTT is pinned to a reproducible release compatible with AsyncTCP 3.5.0.
 

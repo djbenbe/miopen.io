@@ -115,18 +115,22 @@
             return;
         }
 
-
-
+        const logContainer = app.elements.statusMessages;
+        const distanceFromBottom = logContainer.scrollHeight -
+            logContainer.scrollTop - logContainer.clientHeight;
+        const followLatest = distanceFromBottom <= 24;
         const logEntry = document.createElement("p");
         logEntry.textContent = message;
         if (isError) {
-            logEntry.style.color = "red";
+            logEntry.classList.add("log-error");
         }
 
-        app.elements.statusMessages.appendChild(logEntry);
-        app.elements.statusMessages.scrollTop = app.elements.statusMessages.scrollHeight;
-        while (app.elements.statusMessages.children.length > 300) {
-            app.elements.statusMessages.removeChild(app.elements.statusMessages.firstChild);
+        logContainer.appendChild(logEntry);
+        while (logContainer.children.length > 300) {
+            logContainer.removeChild(logContainer.firstChild);
+        }
+        if (followLatest) {
+            logContainer.scrollTop = logContainer.scrollHeight;
         }
     }
 
