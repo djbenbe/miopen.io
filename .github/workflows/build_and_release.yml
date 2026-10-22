@@ -89,6 +89,7 @@ jobs:
           - The saved timezone is applied during boot and reset logs include the numeric ESP reset code.
           - The radio ticker has more stack for busy 1W receive bursts.
           - The log page is scrollable and keeps a bounded browser-side list of recent lines.
+          - Windows builds retry a transient LittleFS staging-folder cleanup race.
           - 2W RX/TX status, frame history and web reads are synchronized to prevent heap corruption during radio bursts.
           - Async MQTT is pinned to a reproducible release compatible with AsyncTCP 3.5.0.
 

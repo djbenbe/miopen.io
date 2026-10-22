@@ -12,8 +12,23 @@ staging_dir = os.path.join(env.subst("$BUILD_DIR"), "webfs")
 compress_extensions = {".css", ".html", ".js", ".json"}
 web_build = datetime.now().astimezone().strftime("%Y%m%d%H%M%S")
 
-if os.path.isdir(staging_dir):
-    shutil.rmtree(staging_dir)
+def remove_staging_dir(path):
+    # Windows can report a file as gone while rmtree is walking the build folder.
+    # Retry only that race; permission and other filesystem errors must still fail.
+    for _ in range(3):
+        if not os.path.isdir(path):
+            return
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            pass
+
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+
+
+remove_staging_dir(staging_dir)
 
 for root, _, files in os.walk(source_dir):
     relative_root = os.path.relpath(root, source_dir)
