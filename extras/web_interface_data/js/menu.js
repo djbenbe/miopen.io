@@ -1,5 +1,6 @@
 (function () {
     const pages = ["devices", "logs", "settings"];
+    let routeGeneration = 0;
 
     function pageElement(name) {
         return document.getElementById(name + "-page");
@@ -16,9 +17,6 @@
         }
         element.innerHTML = await response.text();
         element.dataset.loaded = "true";
-        if (window.MiOpenApp && typeof window.MiOpenApp.initDynamicPage === "function") {
-            window.MiOpenApp.initDynamicPage(name);
-        }
     }
 
     function setPageDisplay(name, activePage) {
@@ -47,15 +45,24 @@
     }
 
     async function applyRoute(route, updateHash) {
+        const generation = ++routeGeneration;
+        pages.forEach(function (page) {
+            setPageDisplay(page, route.page);
+        });
+
         try {
             await loadPageContent(route.page);
         } catch (error) {
             console.error(error);
         }
 
-        pages.forEach(function (page) {
-            setPageDisplay(page, route.page);
-        });
+        if (generation !== routeGeneration) {
+            return;
+        }
+
+        if (window.MiOpenApp && typeof window.MiOpenApp.initDynamicPage === "function") {
+            window.MiOpenApp.initDynamicPage(route.page);
+        }
 
         if (window.MiOpenApp && typeof window.MiOpenApp.setActivePage === "function") {
             window.MiOpenApp.setActivePage(route.page);

@@ -234,10 +234,10 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 
     String payload;
     serializeJson(doc, payload);
-    if (takeMutex(g_webSocketMutex)) {
-      client->text(payload);
-      xSemaphoreGive(g_webSocketMutex);
-    }
+    // The library invokes this callback while its client-list lock is held.
+    // client->text() has its own queue lock; taking g_webSocketMutex here can
+    // deadlock with a log broadcast that is waiting for the client-list lock.
+    client->text(payload);
 
     JsonDocument twoWDoc;
     twoWDoc["type"] = "twowstatus";

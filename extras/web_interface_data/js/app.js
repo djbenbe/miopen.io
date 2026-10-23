@@ -239,11 +239,29 @@
     }
 
     function initWebSocket(app) {
+        if (app.state.pageUnloading) {
+            return;
+        }
+
+        const previousSocket = app.state.ws;
+        if (previousSocket && previousSocket.readyState < WebSocket.CLOSING) {
+            try {
+                previousSocket.close(1000, "replaced");
+            } catch (_error) {
+            }
+        }
+
         const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
         const ws = new WebSocket(wsScheme + "://" + window.location.host + "/ws");
         app.state.ws = ws;
+        app.state.wsGeneration += 1;
+        const generation = app.state.wsGeneration;
 
         ws.onmessage = function (event) {
+            if (app.state.pageUnloading || app.state.ws !== ws ||
+                    app.state.wsGeneration !== generation) {
+                return;
+            }
             let data;
             try {
                 data = JSON.parse(event.data);
@@ -272,12 +290,21 @@
         };
 
         ws.onopen = function () {
+            if (app.state.pageUnloading || app.state.ws !== ws ||
+                    app.state.wsGeneration !== generation) {
+                ws.close(1000, "stale connection");
+                return;
+            }
             app.state.wsConnected = true;
             sendLogSubscription(app, app.state.activePage === "logs");
         };
 
         ws.onclose = function () {
+            if (app.state.ws !== ws || app.state.wsGeneration !== generation) {
+                return;
+            }
             app.state.wsConnected = false;
+            app.state.ws = null;
             if (app.state.pageUnloading) {
                 return;
             }
@@ -440,6 +467,8 @@
                 devicesCache: [],
                 devicesLoadingPromise: null,
                 ws: null,
+                wsConnectTimer: null,
+                wsGeneration: 0,
                 activePage: currentHashPage(),
                 settingsPageReady: false,
                 logsPageReady: false,
@@ -457,21 +486,34 @@
         initHelpButtons(app);
         window.addEventListener("pagehide", function () {
             app.state.pageUnloading = true;
+            if (app.state.wsConnectTimer) {
+                clearTimeout(app.state.wsConnectTimer);
+                app.state.wsConnectTimer = null;
+            }
             if (app.state.wsReconnectTimer) {
                 clearTimeout(app.state.wsReconnectTimer);
                 app.state.wsReconnectTimer = null;
             }
-            if (app.state.ws && app.state.ws.readyState === WebSocket.OPEN) {
-                app.state.ws.close(1000, "page reload");
+            const ws = app.state.ws;
+            app.state.ws = null;
+            app.state.wsGeneration += 1;
+            if (ws && ws.readyState < WebSocket.CLOSING) {
+                try {
+                    ws.close(1000, "page reload");
+                } catch (_error) {
+                }
             }
         });
-        setTimeout(function () {
+        app.state.wsConnectTimer = setTimeout(function () {
+            app.state.wsConnectTimer = null;
             initWebSocket(app);
         }, 800);
         bindEvents(app);
 
         window.addEventListener("i18n:changed", function () {
-            app.fetchAndDisplayDevices();
+            if (app.state.activePage === "devices" && app.elements.deviceList) {
+                app.fetchAndDisplayDevices();
+            }
         });
 
         let footerInfoPending = false;
